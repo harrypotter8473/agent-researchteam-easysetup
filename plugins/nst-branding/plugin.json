@@ -1,0 +1,10 @@
+{
+  "id": "com.nst.wordmark",
+  "name": "NST Wordmark",
+  "description": "Replaces the Mattermost wordmark with NST and labels the edition badge BETA VERSION in Channels and login headers.",
+  "version": "0.1.0",
+  "min_server_version": "11.0.0",
+  "webapp": {
+    "bundle_path": "webapp/dist/main.js"
+  }
+}

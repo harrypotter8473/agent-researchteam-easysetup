@@ -1,0 +1,13 @@
+* text=auto
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.cmd text eol=crlf
+*.json text eol=lf
+*.md text eol=lf
+# The team payload is hash-pinned (team/manifest.json): keep its bytes identical on every checkout.
+/team/** text eol=lf
+# Preserve the original persona bytes used by the pinned payload manifest.
+/team/**/SOUL.md -text
+# The plugin bridge is hash-pinned as well.
+/plugins/** text eol=lf
+/plugins/nst-branding/** -text

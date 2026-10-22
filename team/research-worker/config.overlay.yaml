@@ -1,0 +1,10 @@
+# Merged into ~/.hermes/profiles/research-worker/config.yaml by install.sh.
+# Runs on the compute device (GPUs, the experiment code, the data).
+terminal:
+  cwd: "."              # the runner starts hermes inside the paper clone
+  timeout: 1800         # environment setup and smoke tests can be slow
+agent:
+  max_turns: 2000
+  # Memory stays ON: how this machine, its drivers and the codebase behave is worth keeping.
+  # Integrity comes from the protocol freeze, not from forgetting.
+  disabled_toolsets: [delegation, cronjob, messaging, code_execution]

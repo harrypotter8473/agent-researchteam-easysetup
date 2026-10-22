@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "packages": [
+    {
+      "id": "com.hermes.research-board",
+      "version": "0.1.2",
+      "file": "com.hermes.research-board-0.1.2.tar.gz",
+      "sha256": "10fe31976227dcf9598ede9d734e988644ce23d11261910c9875fb3407a8f92c"
+    },
+    {
+      "id": "com.nst.wordmark",
+      "version": "0.1.0",
+      "file": "com.nst.wordmark-0.1.0.tar.gz",
+      "sha256": "1d9d443ef27f245d312de1ccd8287230b967fc27c999fbd4f4339df171dab772"
+    }
+  ],
+  "bridge": {
+    "path": "plugins/research-board/bridge.py",
+    "sha256": "e4eaf4d99c9ae079c4e552c20dad803c4af223da7bccb9bcf88d3fb87460bcbf"
+  }
+}

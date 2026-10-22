@@ -1,0 +1,7 @@
+# Merged into ~/.hermes/profiles/research-scout/config.yaml by install.sh.
+terminal:
+  cwd: "."              # runner clone, saved extracts reused
+agent:
+  max_turns: 2000
+  # Research memory is retained; independent auditing belongs only to the reviewer.
+  disabled_toolsets: [delegation, cronjob, messaging, code_execution]

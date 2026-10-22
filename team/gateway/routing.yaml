@@ -1,0 +1,52 @@
+# Routing policy for the research team's LiteLLM gateway (read by research_gateway_policy.py).
+# Model names on the right are `model_name`s in litellm.config.yaml.
+
+# Difficulty: one tier per Hermes profile. Fixed by role, not guessed per message — the board
+# already knows how hard each kind of task is, and a fixed model keeps a session's prompt
+# cache and tool-call style stable.
+roles:
+  research-worker: strong
+  research-reviewer: strong        # the Claude Code harness ran referees on the strongest model
+  research-scout: mid
+  research-lead: auto              # status questions → cheap; dispatching and scoping → strong
+
+# Models per side; names are model_names in litellm.config.yaml. A side counts as available
+# only if all three of its names are configured there (checked on every request, so
+# uncommenting the local entries and restarting the gateway is all it takes).
+#   cloud  Claude, falling back to OpenAI on an outage (litellm.config.yaml `fallbacks`)
+#   local  local models only — never a cloud fallback
+models:
+  cloud: {strong: cloud-strong, mid: cloud-mid,    cheap: cloud-cheap}
+  local: {strong: local-strong, mid: local-strong, cheap: local-fast}
+
+# Sensitivity classes, from the paper's CLAUDE.md (missing → public, the current default):
+#   public      cloud, freely
+#   private     cloud or local per request, decided by research_gateway_policy.decide_side() — not
+#               implemented yet, so `private_default` applies. When local is chosen but not
+#               available the request is refused with "local models unavailable"; it never
+#               goes to the cloud instead.
+#   air-gapped  local only; refused the same way when local is not available
+private_default: local
+
+# Effort, as an OpenAI-style level (none / low / medium / high / xhigh / max). The gateway
+# fits it to each concrete model: Opus/Sonnet 5.5 get adaptive thinking + output_config.effort,
+# Haiku 4.5 gets a thinking budget (none = no thinking), OpenAI models get reasoning.effort,
+# and levels a model lacks step down (max → xhigh → high). Local models get none sent.
+effort:
+  strong: high
+  mid: medium
+  cheap: none                   # compression, titles, status replies: no thinking
+role_effort:                    # overrides for the role's own tier (not its aux calls)
+  research-reviewer: xhigh         # adversarial reading pays for itself; few calls per round
+  research-lead: medium            # dispatching runs a fixed skill; it needs judgment, not depth
+
+# What Hermes asks for. `research` = the main model; `research-aux` = auxiliary calls (context
+# compression, titles, vision, web extraction), always sent to the cheap tier.
+aux_model_name: research-aux
+
+# The lead's `auto` tier, decided once per conversation from its first user message.
+auto:
+  default: strong
+  max_chars: 280
+  cheap_if:
+    - '^\W*(@\S+\s+)?(status|progress|list|board|ping|where are we|what.s (running|left))\b'

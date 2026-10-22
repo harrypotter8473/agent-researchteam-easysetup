@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "reviewedOn": "2026-08-24",
+  "channel": "verified-release",
+  "hermes": {
+    "repository": "NousResearch/hermes-agent",
+    "releaseTag": "v2026.8.19",
+    "tagObjectSha": "b05e680e63d39d5a8e3ec0f5842a41d1c4209c03",
+    "commitSha": "fcbd1076a93841fa88855acce810e342a5b78101"
+  },
+  "installer": {
+    "path": "scripts/install.ps1",
+    "uri": "https://raw.githubusercontent.com/NousResearch/hermes-agent/fcbd1076a93841fa88855acce810e342a5b78101/scripts/install.ps1",
+    "apiFallbackUri": "https://api.github.com/repos/NousResearch/hermes-agent/git/blobs/38c2012a97248c9763e5e25ab282dfdae5b63dff",
+    "gitBlobSha": "38c2012a97248c9763e5e25ab282dfdae5b63dff",
+    "sha256": "74225BF244253BFA5BC2B1D16FA3BB8618E199A53D1C0344B37AB9930696D3BA",
+    "sizeBytes": 235757,
+    "maxBytes": 524288,
+    "stageProtocolVersion": 1
+  },
+  "allowedDownloadHosts": [
+    "raw.githubusercontent.com",
+    "api.github.com"
+  ],
+  "documentation": {
+    "home": "https://hermes-agent.nousresearch.com/docs/",
+    "install": "https://hermes-agent.nousresearch.com/docs/getting-started/installation/",
+    "windows": "https://hermes-agent.nousresearch.com/docs/user-guide/windows-native/",
+    "security": "https://hermes-agent.nousresearch.com/docs/user-guide/security/",
+    "upstream": "https://github.com/NousResearch/hermes-agent"
+  }
+}

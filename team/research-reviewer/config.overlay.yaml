@@ -1,0 +1,11 @@
+# Merged into ~/.hermes/profiles/research-reviewer/config.yaml by install.sh.
+# Strongest model you have — the Claude harness ran this role on Opus. Uncomment to pin:
+# model: anthropic/claude-opus-5-5
+terminal:
+  cwd: "."              # the runner starts hermes inside a snapshot of the paper
+agent:
+  max_turns: 2000
+  # Blind by construction: no memory and no past-session search, so a referee cannot carry
+  # an earlier round into this one, and a chair is always fresh. Also makes parallel runner
+  # slots on this one profile safe.
+  disabled_toolsets: [memory, session_search, delegation, cronjob, messaging, code_execution]

@@ -1,0 +1,30 @@
+# Merged into ~/.hermes/profiles/research-lead/config.yaml by install.sh.
+# Model/provider: the gateway overlay, or (without it) copied from the default profile at creation.
+terminal:
+  cwd: "__WORKSPACE__"   # the folder holding your clones of the paper repos (and _template/)
+agent:
+  max_turns: 2000
+  system_prompt: |
+    This is the installed Git-board 3+1 research team. Before acting on a research
+    request, load research-orchestrate from __SKILLS_DIR__/research-orchestrate/SKILL.md.
+    Scope the request, persist criteria and dispatch tasks with "__PYTHON__" "__RESEARCH_BOARD__".
+    The independent scout, worker and blind reviewer perform substantive work.
+    Use current-version audit gates; do not substitute a solo answer for team work.
+    Preserve the user's Mattermost thread and report paths, blockers and next actions.
+    SOUL.md contains the complete unchanged persona and common rules.
+  # The lead hands work to the other devices through the board, not in-process subagents.
+  # Unattended execute_code is denied by Hermes. Expose usable file/terminal
+  # tools instead; this does not disable or bypass command approval.
+  disabled_toolsets: [delegation, messaging, code_execution]
+display:
+  # A message that arrives while the lead is mid-dispatch waits for the turn to finish
+  # instead of interrupting it halfway through creating a round's tasks.
+  busy_input_mode: queue
+  platforms:
+    mattermost:
+      # Detailed runner/coordinator activity belongs on the Korean web board.
+      # Keep native Gateway tool previews/reasoning out of the shared thread.
+      tool_progress: "off"
+      show_reasoning: false
+      interim_assistant_messages: false
+      busy_ack_detail: false

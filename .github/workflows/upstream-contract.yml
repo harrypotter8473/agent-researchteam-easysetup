@@ -1,0 +1,41 @@
+name: Upstream contract smoke
+
+on:
+  pull_request:
+    paths:
+      - config/hermes-source.json
+      - config/hermes-manifest.json
+      - src/HermesEasySetup.Core.psm1
+      - src/HermesEasySetup.Preflight.psm1
+      - src/HermesEasySetup.Protocol.psm1
+      - tests/Run-UpstreamContractSmoke.ps1
+      - .github/workflows/upstream-contract.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verified-pin:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify annotated tag, peeled commit, installer blob, and base manifest
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .\tests\Run-UpstreamContractSmoke.ps1
+
+      - name: Verify pinned Desktop manifest
+        shell: powershell
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .\tests\Run-UpstreamContractSmoke.ps1 -IncludeDesktop

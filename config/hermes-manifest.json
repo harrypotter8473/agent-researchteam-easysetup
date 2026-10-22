@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "baseStages": [
+    "uv",
+    "python",
+    "git",
+    "node",
+    "system-packages",
+    "repository",
+    "venv",
+    "dependencies",
+    "node-deps",
+    "path",
+    "config-templates",
+    "platform-sdks",
+    "bootstrap-marker",
+    "configure",
+    "gateway"
+  ],
+  "desktopStage": {
+    "name": "desktop",
+    "after": "node-deps"
+  },
+  "interactiveStages": [
+    "configure",
+    "gateway"
+  ],
+  "allowedCategories": [
+    "prereqs",
+    "install",
+    "finalize",
+    "post-install"
+  ]
+}

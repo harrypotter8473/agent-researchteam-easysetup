@@ -1,0 +1,65 @@
+# LiteLLM proxy for the research team. Run on a machine every device can reach (once local
+# models exist, the GPU box serving them — private traffic then never leaves it):
+#
+#   pip install 'litellm[proxy]' pyyaml
+#   export RESEARCH_GATEWAY_SECRET=<long random string, shared with the devices>
+#   export LITELLM_MASTER_KEY=sk-<another long random string>
+#   export ANTHROPIC_API_KEY=...  OPENAI_API_KEY=...
+#   cd hermes/gateway && litellm --config litellm.config.yaml --port 4000
+#
+# Agents ask for `research` / `research-aux`; research_gateway_litellm.py rewrites that to one of the
+# model_names below. There is deliberately no entry named `research`: if the hook ever fails to
+# load, requests fail instead of going somewhere unrouted.
+#
+# routing.yaml decides per request whether the cloud or the local side serves it; a side is
+# available only if all its entries below are present. Today only the cloud side is: public
+# papers run, private and air-gapped ones are refused with "local models unavailable".
+
+model_list:
+  # ── cloud: Claude first ──────────────────────────────────────────────────────
+  - model_name: cloud-strong
+    litellm_params: {model: anthropic/claude-opus-5-5, api_key: os.environ/ANTHROPIC_API_KEY}
+  - model_name: cloud-mid
+    litellm_params: {model: anthropic/claude-sonnet-5-5, api_key: os.environ/ANTHROPIC_API_KEY}
+  - model_name: cloud-cheap
+    litellm_params: {model: anthropic/claude-haiku-4-5-20251001, api_key: os.environ/ANTHROPIC_API_KEY}
+
+  # ── cloud fallbacks: OpenAI, used only when the Claude call fails after retries ──
+  # The current OpenAI models are served through the Responses API; the `responses/` prefix
+  # makes LiteLLM translate. store: false — OpenAI keeps no copy of the conversation.
+  - model_name: cloud-strong-openai
+    litellm_params: {model: openai/responses/gpt-6-astra, api_key: os.environ/OPENAI_API_KEY, store: false}
+  - model_name: cloud-mid-openai
+    litellm_params: {model: openai/responses/gpt-6.1-sol, api_key: os.environ/OPENAI_API_KEY, store: false}
+  - model_name: cloud-cheap-openai
+    litellm_params: {model: openai/responses/gpt-6-luna, api_key: os.environ/OPENAI_API_KEY, store: false}
+
+  # ── local: private (when chosen) and air-gapped papers ─────────────────────────
+  # Uncomment both once they are served. The agents depend on tool calling: start vLLM with
+  # --enable-auto-tool-choice and the model's --tool-call-parser, and a context ≥ 64k.
+  # - model_name: local-strong
+  #   litellm_params: {model: hosted_vllm/<served-model-name>, api_base: "http://127.0.0.1:8000/v1"}
+  # - model_name: local-fast
+  #   litellm_params: {model: hosted_vllm/<served-model-name>, api_base: "http://127.0.0.1:8001/v1"}
+
+router_settings:
+  num_retries: 2
+  # Claude → OpenAI on the cloud side only. Never add a fallback from a local model:
+  # that would send a private paper to the cloud whenever the local server is down.
+  fallbacks:
+    - {cloud-strong: [cloud-strong-openai]}
+    - {cloud-mid: [cloud-mid-openai]}
+    - {cloud-cheap: [cloud-cheap-openai]}
+
+litellm_settings:
+  callbacks: research_gateway_litellm.proxy_handler_instance
+  cache: false                  # no response cache: never answer one role with another's reply
+  drop_params: true             # local servers reject some OpenAI params Hermes may send
+  turn_off_message_logging: true
+
+general_settings:
+  custom_auth: research_gateway_litellm.user_api_key_auth
+  # LiteLLM will not start without a strong master key. Custom auth sees every request,
+  # this key included, and refuses anything that is not a rgw.* key.
+  master_key: os.environ/LITELLM_MASTER_KEY
+  store_prompts_in_spend_logs: false

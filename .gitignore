@@ -1,0 +1,47 @@
+# Runtime output
+.cache/
+cache/
+logs/
+state/
+diagnostics/
+ui-transport/
+*.log
+*.zip
+
+# Credentials and local Hermes data
+.env
+.env.*
+config.yaml
+config.yml
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+
+# Temporary and edit backups
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+*initial*
+*edit-backup*
+*.codex-acl-backup
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local source overrides
+config/hermes-source.local.json
+
+# Local working notes, not part of the installer
+Claude outputs/
+docs/work-in-progress*.md

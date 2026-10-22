@@ -1,0 +1,19 @@
+# Merged into a profile's config.yaml by `install.sh <role> --gateway` (after the role's own
+# overlay). Sends the main model AND the auxiliary calls through the paper gateway, so the
+# gateway sees — and can keep local — everything that carries paper text.
+#
+# The key comes from RESEARCH_GATEWAY_API_KEY: the runner sets it per task (role + the paper's
+# sensitivity); the lead and *-chat profiles keep a fixed one in their .env.
+providers:
+  research-gateway:
+    api: "__RESEARCH_GATEWAY_URL__"
+    key_env: RESEARCH_GATEWAY_API_KEY
+    transport: chat_completions
+model:
+  default: research
+  provider: research-gateway
+  context_length: 128000        # the smallest context among the models the gateway may pick
+auxiliary:
+  compression: {provider: research-gateway, model: research-aux}
+  vision: {provider: research-gateway, model: research-aux}
+  web_extract: {provider: research-gateway, model: research-aux}

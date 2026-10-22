@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "platform": "linux/amd64",
+  "mattermostVersion": "11.11.0",
+  "mattermostImage": "mattermost/mattermost-enterprise-edition@sha256:17fe274148e3f2b3a5610580ef9b547535b00e00f9088904e8fd9962317dff70",
+  "postgresVersion": "16.14-alpine3.24",
+  "postgresImage": "postgres@sha256:7a396fd264a2067788b6551122b50f162bf6136312c7fc9d74381cb92c648382"
+}

@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "version": "4.94.0",
+  "architecture": "x64",
+  "url": "https://desktop.docker.com/win/main/amd64/241994/Docker%20Desktop%20Installer.exe",
+  "sha256": "a9814e31049d66156477a86614e83365669677733014ec72f74229623ff3890a",
+  "publisher": "Docker Inc",
+  "releaseNotes": "https://docs.docker.com/desktop/release-notes/#4940",
+  "checksumURL": "https://desktop.docker.com/win/main/amd64/241994/checksums.txt"
+}

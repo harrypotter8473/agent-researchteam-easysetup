@@ -1,0 +1,260 @@
+name: Windows install E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-install-e2e
+  cancel-in-progress: false
+
+jobs:
+  native-install:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install without credentials or setup
+        shell: powershell
+        run: |
+          $systemPowerShell = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+          $e2eRoot = Join-Path $env:RUNNER_TEMP 'hermes-easy-setup-e2e'
+          $hermesHome = Join-Path $e2eRoot 'hermes'
+          $installDir = Join-Path $hermesHome 'hermes-agent'
+          $runtimeRoot = Join-Path $e2eRoot 'wizard-runtime'
+          $cli = Join-Path $env:GITHUB_WORKSPACE 'HermesEasySetup.ps1'
+
+          foreach ($cleanTarget in @($hermesHome, $installDir, $runtimeRoot)) {
+            if (Test-Path -LiteralPath $cleanTarget) { throw "E2E target is not clean: $cleanTarget" }
+          }
+          New-Item -ItemType Directory -Path $e2eRoot -Force | Out-Null
+          $callerGitConfig = Join-Path $e2eRoot 'caller-gitconfig'
+          $callerGitAttributes = Join-Path $e2eRoot 'caller-attributes'
+          $callerGitAttributesText = "*.mdx text eol=crlf`n"
+          [System.IO.File]::WriteAllText($callerGitAttributes, $callerGitAttributesText, (New-Object System.Text.UTF8Encoding($false)))
+          $callerAttributesValue = ([System.IO.Path]::GetFullPath($callerGitAttributes)).Replace('\', '/').Replace('"', '\"')
+          $callerGitConfigText = "[core]`n`tautocrlf = true`n`tattributesFile = `"$callerAttributesValue`"`n"
+          [System.IO.File]::WriteAllText($callerGitConfig, $callerGitConfigText, (New-Object System.Text.UTF8Encoding($false)))
+          $env:GIT_CONFIG_GLOBAL = $callerGitConfig
+
+          $hostileGitBin = Join-Path $e2eRoot 'hostile-bin'
+          $fakeGitMarker = Join-Path $e2eRoot 'fake-git-executed'
+          New-Item -ItemType Directory -Path $hostileGitBin -Force | Out-Null
+          $fakeGitText = "@echo off`r`n>`"$fakeGitMarker`" echo hostile-git-executed`r`nexit /b 97`r`n"
+          [System.IO.File]::WriteAllText((Join-Path $hostileGitBin 'git.cmd'), $fakeGitText, (New-Object System.Text.ASCIIEncoding))
+          $env:PATH = $hostileGitBin + [System.IO.Path]::PathSeparator + $env:PATH
+          $hostileCommonDir = Join-Path $e2eRoot 'hostile-common-dir'
+          New-Item -ItemType Directory -Path $hostileCommonDir -Force | Out-Null
+          $env:GIT_COMMON_DIR = $hostileCommonDir
+          $env:GIT_NAMESPACE = 'hermes-e2e-hostile'
+
+          $planText = & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Plan -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -Json
+          if ($LASTEXITCODE -ne 0) { throw "Plan failed with exit code $LASTEXITCODE" }
+          $plan = $planText | ConvertFrom-Json
+          if (-not [bool]$plan.SkipComputerUse -or [bool]$plan.IncludeDesktop -or [string]$plan.SetupMode -cne 'Later') { throw 'Plan is outside the v0.1.2 base CLI scope.' }
+
+          $computerUseOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SetupMode Later -Json)
+          if ($LASTEXITCODE -ne 10) { throw 'Computer Use bootstrap was not rejected before install.' }
+          $desktopOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -IncludeDesktop -SetupMode Later -Json)
+          if ($LASTEXITCODE -ne 10) { throw 'Desktop bootstrap was not rejected before install.' }
+          foreach ($cleanTarget in @($hermesHome, $installDir, $runtimeRoot)) {
+            if (Test-Path -LiteralPath $cleanTarget) { throw "MVP policy rejection mutated target: $cleanTarget" }
+          }
+
+          Import-Module (Join-Path $env:GITHUB_WORKSPACE 'src\HermesEasySetup.Loader.psm1') -Force
+          $baselineGit = Get-HermesVerificationGitPath -HermesHome $hermesHome
+          if ([string]::IsNullOrWhiteSpace($baselineGit)) { throw 'No trusted Program Files Git is available for the E2E registry PATH baseline.' }
+          $machineRegistryPath = @(
+            (Join-Path $env:SystemRoot 'System32'),
+            $env:SystemRoot,
+            (Join-Path $env:SystemRoot 'System32\Wbem'),
+            (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0'),
+            (Join-Path $env:SystemRoot 'System32\OpenSSH')
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -Unique
+          $machineRegistryPath = $machineRegistryPath -join [System.IO.Path]::PathSeparator
+          [Environment]::SetEnvironmentVariable('Path', $machineRegistryPath, [EnvironmentVariableTarget]::Machine)
+          if (-not [string]::Equals([Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine), $machineRegistryPath, [System.StringComparison]::Ordinal)) { throw 'Could not establish the clean Machine PATH baseline.' }
+          $baselineGitDirectory = Split-Path -Parent $baselineGit
+          $originalUserRegistryPath = $baselineGitDirectory
+          [Environment]::SetEnvironmentVariable('Path', $originalUserRegistryPath, [EnvironmentVariableTarget]::User)
+          try {
+            $hostileUserRegistryPath = $(if ([string]::IsNullOrWhiteSpace($originalUserRegistryPath)) { $hostileGitBin } else { $hostileGitBin + [System.IO.Path]::PathSeparator + $originalUserRegistryPath })
+            [Environment]::SetEnvironmentVariable('Path', $hostileUserRegistryPath, [EnvironmentVariableTarget]::User)
+            $negativeInstallOutput = @(& $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -ExpectedPlanFingerprint $plan.Fingerprint -Json)
+            $negativeInstallExit = $LASTEXITCODE
+            if ($negativeInstallExit -ne 10) { throw "Hostile User PATH was not rejected before install; exit=$negativeInstallExit" }
+            if (Test-Path -LiteralPath $fakeGitMarker) { throw 'Hostile User PATH Git was executed during rejection.' }
+          } finally {
+            [Environment]::SetEnvironmentVariable('Path', $originalUserRegistryPath, [EnvironmentVariableTarget]::User)
+          }
+          if (Test-Path -LiteralPath $runtimeRoot) { throw 'Registry PATH rejection mutated RuntimeRoot.' }
+
+          & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Install -Apply -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -SkipComputerUse -SetupMode Later -ExpectedPlanFingerprint $plan.Fingerprint -JsonEvents
+          $installExit = $LASTEXITCODE
+
+          $verifyText = & $systemPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass -File $cli -Action Verify -HermesHome $hermesHome -InstallDir $installDir -RuntimeRoot $runtimeRoot -Json
+          $verifyExit = $LASTEXITCODE
+          $verify = $null
+          $verifyFrames = @($verifyText)
+          if ($verifyFrames.Count -gt 0) {
+            try { $verify = $verifyFrames[-1] | ConvertFrom-Json } catch { Write-Host 'Verify JSON parsing failed.' }
+          }
+          if ($installExit -ne 0 -or $verifyExit -ne 0 -or $null -eq $verify) {
+            $safeDiagnostic = [ordered]@{
+              InstallExit = $installExit
+              VerifyExit = $verifyExit
+              VerifyJsonParsed = ($null -ne $verify)
+              Verified = [bool]$verify.Verified
+              CommandWorks = [bool]$verify.CommandWorks
+              StaticProvenanceValid = [bool]$verify.StaticProvenanceValid
+              VersionStartFailed = [bool]$verify.VersionStartFailed
+              VenvPythonPresent = [bool]$verify.VenvPythonPresent
+              CheckoutPresent = [bool]$verify.CheckoutPresent
+              CheckoutHeadMatches = [bool]$verify.CheckoutHeadMatches
+              OriginOfficial = [bool]$verify.OriginOfficial
+              CheckoutClean = [bool]$verify.CheckoutClean
+              CheckoutLayoutValid = [bool]$verify.CheckoutLayoutValid
+              IndexMatchesExpectedTree = [bool]$verify.IndexMatchesExpectedTree
+              IndexFlagsClean = [bool]$verify.IndexFlagsClean
+              LocalGitConfigSafe = [bool]$verify.LocalGitConfigSafe
+              RepositoryMetadataSafe = [bool]$verify.RepositoryMetadataSafe
+              NoGitLinks = [bool]$verify.NoGitLinks
+              GitExcludesIsolated = [bool]$verify.GitExcludesIsolated
+              LocalExcludeOverrideAbsent = [bool]$verify.LocalExcludeOverrideAbsent
+              ManagedLaunchersValid = [bool]$verify.ManagedLaunchersValid
+              ManagedLauncherExclusionsValid = [bool]$verify.ManagedLauncherExclusionsValid
+              LauncherAttestationValid = [bool]$verify.LauncherAttestationValid
+              BootstrapMarker = [bool]$verify.BootstrapMarker
+              MarkerMatches = [bool]$verify.MarkerMatches
+              GitStatusExitCode = $verify.GitStatusExitCode
+              FailedChecks = @($verify.FailedChecks)
+              CheckoutStatus = [string]$verify.CheckoutStatus
+              CheckoutStatusTruncated = [bool]$verify.CheckoutStatusTruncated
+            }
+            Write-Host ('Product verification diagnostics: ' + ($safeDiagnostic | ConvertTo-Json -Compress -Depth 4))
+            Remove-Item Env:GIT_CONFIG_GLOBAL -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_COMMON_DIR -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_NAMESPACE -ErrorAction SilentlyContinue
+            Import-Module (Join-Path $env:GITHUB_WORKSPACE 'src\HermesEasySetup.Loader.psm1') -Force
+            $diagnosticGit = Get-HermesVerificationGitPath -HermesHome $hermesHome
+            if (-not [string]::IsNullOrWhiteSpace($diagnosticGit) -and [bool]$verify.RepositoryMetadataSafe -and (Test-Path -LiteralPath (Join-Path $installDir '.git'))) {
+              $diagnosticPlan = [pscustomobject]@{ HermesHome = $hermesHome; RuntimeRoot = $runtimeRoot }
+              $diagnosticEnvironment = New-HermesStageEnvironment -Plan $diagnosticPlan -Stage 'repository' -IsolatedGitVerification
+              try {
+                $diagnosticProcess = Invoke-HermesProcess -FilePath $diagnosticGit -ArgumentList @('-C', $installDir, 'status', '--porcelain=v1', '--untracked-files=normal') -Environment $diagnosticEnvironment -TimeoutSeconds 60
+                $diagnosticCandidates = @($diagnosticProcess.StdOut -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 21)
+                $diagnosticStatus = Protect-HermesLogText ((@($diagnosticCandidates | Select-Object -First 20)) -join '; ')
+                $diagnosticTruncated = ($diagnosticCandidates.Count -gt 20 -or $diagnosticStatus.Length -gt 4096)
+                if ($diagnosticStatus.Length -gt 4096) { $diagnosticStatus = $diagnosticStatus.Substring(0, 4096) }
+                $diagnosticStatusResult = [ordered]@{ ExitCode = $diagnosticProcess.ExitCode; TimedOut = $diagnosticProcess.TimedOut; Status = $diagnosticStatus; Truncated = $diagnosticTruncated }
+                Write-Host ('Independent checkout diagnostics: ' + ($diagnosticStatusResult | ConvertTo-Json -Compress -Depth 3))
+              } finally {
+                Remove-HermesStageEnvironmentArtifacts -Environment $diagnosticEnvironment -Plan $diagnosticPlan
+              }
+            }
+            throw "Install/Verify failed with exit codes $installExit/$verifyExit"
+          }
+          if (-not [bool]$verify.Verified -or -not [bool]$verify.StaticProvenanceValid -or [bool]$verify.VersionStartFailed -or -not [bool]$verify.CheckoutClean -or -not [bool]$verify.CheckoutLayoutValid -or -not [bool]$verify.IndexMatchesExpectedTree -or -not [bool]$verify.IndexFlagsClean -or -not [bool]$verify.LocalGitConfigSafe -or -not [bool]$verify.RepositoryMetadataSafe -or -not [bool]$verify.NoGitLinks -or -not [bool]$verify.OriginOfficial -or -not [bool]$verify.GitExcludesIsolated -or -not [bool]$verify.LocalExcludeOverrideAbsent -or -not [bool]$verify.ManagedLaunchersValid -or -not [bool]$verify.ManagedLauncherExclusionsValid -or -not [bool]$verify.LauncherAttestationValid) { throw 'Product provenance verification did not pass.' }
+          Remove-Item Env:GIT_CONFIG_GLOBAL
+          Remove-Item Env:GIT_COMMON_DIR
+          Remove-Item Env:GIT_NAMESPACE
+
+          $source = Get-Content -Raw -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'config\hermes-source.json') | ConvertFrom-Json
+          $marker = Get-Content -Raw -LiteralPath (Join-Path $installDir '.hermes-bootstrap-complete') | ConvertFrom-Json
+          if ([string]$marker.pinnedCommit -ne [string]$source.hermes.commitSha) { throw 'Bootstrap marker commit mismatch.' }
+          Import-Module (Join-Path $env:GITHUB_WORKSPACE 'src\HermesEasySetup.Loader.psm1') -Force
+          $git = Get-HermesVerificationGitPath -HermesHome $hermesHome
+          if ([string]::IsNullOrWhiteSpace($git)) { throw 'No trusted Git executable is available for provenance checks.' }
+          if ([string]$verify.GitPath -ne [string]$git) { throw 'Verify used an unexpected Git executable.' }
+
+          $managedNodeDirectory = [System.IO.Path]::GetFullPath((Join-Path $hermesHome 'node'))
+          $managedNodeExecutable = [System.IO.Path]::GetFullPath((Join-Path $managedNodeDirectory 'node.exe'))
+          $legacyLauncherDirectory = [System.IO.Path]::GetFullPath((Join-Path $installDir 'venv\Scripts'))
+          $launcherDirectory = [System.IO.Path]::GetFullPath((Join-Path $installDir 'bin'))
+          $attestation = Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'state\launcher-attestation-v1.json') | ConvertFrom-Json
+          $managedNodeRecords = @($attestation.managedCommands | Where-Object {
+            [string]$_.command -eq 'node' -and [string]::Equals([System.IO.Path]::GetFullPath([string]$_.path), $managedNodeExecutable, [System.StringComparison]::OrdinalIgnoreCase)
+          })
+          if ($managedNodeRecords.Count -gt 1) { throw 'Managed Node attestation is ambiguous.' }
+          $expectedUserRegistryPath = $originalUserRegistryPath
+          if ($managedNodeRecords.Count -eq 1) {
+            $originalPathItems = $(if ($originalUserRegistryPath) { @(([string]$originalUserRegistryPath) -split ';') } else { @() })
+            $nodePathCandidate = (@($managedNodeDirectory) + @($originalPathItems | Where-Object { $_ -ne $managedNodeDirectory })) -join ';'
+            $expectedUserRegistryPath = $(if ($nodePathCandidate -ne $originalUserRegistryPath) { $nodePathCandidate } else { $originalUserRegistryPath })
+          }
+          if ($expectedUserRegistryPath -like "*$legacyLauncherDirectory*") {
+            $expectedUserRegistryPath = (([string]$expectedUserRegistryPath) -split ';' | Where-Object { $_ -and $_ -ne $legacyLauncherDirectory }) -join ';'
+          }
+          if ($expectedUserRegistryPath -notlike "*$launcherDirectory*") {
+            $expectedUserRegistryPath = "$launcherDirectory;$expectedUserRegistryPath"
+          }
+          $actualUserRegistryPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User)
+          $actualUserHermesHome = [Environment]::GetEnvironmentVariable('HERMES_HOME', [EnvironmentVariableTarget]::User)
+          if (-not [string]::Equals($actualUserRegistryPath, $expectedUserRegistryPath, [System.StringComparison]::Ordinal)) { throw 'User PATH does not match the reviewed upstream transition.' }
+          if (-not [string]::Equals($actualUserHermesHome, $hermesHome, [System.StringComparison]::Ordinal)) { throw 'User HERMES_HOME does not match the install plan.' }
+
+          $gitRoot = Split-Path -Parent (Split-Path -Parent $git)
+          $actualGitBashPath = [Environment]::GetEnvironmentVariable('HERMES_GIT_BASH_PATH', [EnvironmentVariableTarget]::User)
+          $trustedGitBashCandidates = @((Join-Path $gitRoot 'bin\bash.exe'), (Join-Path $gitRoot 'usr\bin\bash.exe'))
+          $trustedGitBashMatch = @($trustedGitBashCandidates | Where-Object {
+            (Test-Path -LiteralPath $_ -PathType Leaf) -and [string]::Equals([System.IO.Path]::GetFullPath($_), [System.IO.Path]::GetFullPath($actualGitBashPath), [System.StringComparison]::OrdinalIgnoreCase)
+          }).Count -eq 1
+          if (-not $trustedGitBashMatch) { throw 'User HERMES_GIT_BASH_PATH is not the trusted Program Files Git Bash.' }
+
+          $finalState = Get-Content -Raw -LiteralPath (Join-Path $runtimeRoot 'state\install-state.json') | ConvertFrom-Json
+          $configureState = @($finalState.stages | Where-Object { [string]$_.name -eq 'configure' })
+          $gatewayState = @($finalState.stages | Where-Object { [string]$_.name -eq 'gateway' })
+          $nodeDepsState = @($finalState.stages | Where-Object { [string]$_.name -eq 'node-deps' })
+          $desktopState = @($finalState.stages | Where-Object { [string]$_.name -eq 'desktop' })
+          if ([string]$finalState.status -cne 'Completed' -or $configureState.Count -ne 1 -or [string]$configureState[0].status -cne 'Skipped' -or $gatewayState.Count -ne 1 -or [string]$gatewayState[0].status -cne 'Skipped' -or $nodeDepsState.Count -ne 1 -or [string]$nodeDepsState[0].status -cne 'Skipped' -or [string]$nodeDepsState[0].reason -notlike '*Browser/TUI*' -or $desktopState.Count -ne 0) { throw 'Final state is outside the v0.1.2 base CLI scope.' }
+          if (@($attestation.managedCommands | Where-Object { @('browser-use', 'cua-driver') -contains [string]$_.command }).Count -ne 0) { throw 'Deferred browser or Computer Use command was unexpectedly attested.' }
+          foreach ($deferredArtifact in @((Join-Path $hermesHome 'bin\browser-use.exe'), (Join-Path $installDir 'node_modules'), (Join-Path $installDir 'ui-tui\node_modules'))) {
+            if (Test-Path -LiteralPath $deferredArtifact) { throw "Deferred node-deps artifact exists: $deferredArtifact" }
+          }
+
+          $excludePath = Join-Path $installDir '.git\info\exclude'
+          $excludeLines = @(Get-Content -LiteralPath $excludePath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and -not $_.StartsWith('#') })
+          if ($excludeLines.Count -ne 2 -or $excludeLines -cnotcontains '/bin/hermes.exe' -or $excludeLines -cnotcontains '/bin/hermes-acp.exe') { throw 'Managed launcher exclusion contract mismatch.' }
+          foreach ($launcherName in @('hermes.exe', 'hermes-acp.exe')) {
+            $launcher = Join-Path $installDir "bin\$launcherName"
+            $sourceLauncher = Join-Path $installDir "venv\Scripts\$launcherName"
+            if ((Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $sourceLauncher -Algorithm SHA256).Hash) { throw "Managed launcher hash mismatch: $launcherName" }
+          }
+          & $git -C $installDir check-ignore -q --no-index -- bin/unexpected.exe
+          if ($LASTEXITCODE -ne 1) { throw 'Unexpected bin path is ignored.' }
+
+          $headText = @(& $git -C $installDir rev-parse HEAD)
+          if ($LASTEXITCODE -ne 0) { throw "git rev-parse failed with exit code $LASTEXITCODE" }
+          $head = ($headText -join "`n").Trim()
+          if ($head -ne [string]$source.hermes.commitSha) { throw 'Checkout HEAD mismatch.' }
+          & $git -C $installDir diff --exit-code $head -- package-lock.json ui-tui/package-lock.json
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned package lockfiles changed.' }
+
+          $autocrlfText = @(& $git -C $installDir config --bool --get core.autocrlf)
+          if ($LASTEXITCODE -ne 0) { throw "git config failed with exit code $LASTEXITCODE" }
+          $autocrlf = ($autocrlfText -join "`n").Trim()
+          if ($autocrlf -ne 'false') { throw "Checkout core.autocrlf is '$autocrlf', expected false." }
+
+          $statusText = @(& $git -C $installDir status --porcelain --untracked-files=normal)
+          if ($LASTEXITCODE -ne 0) { throw "git status failed with exit code $LASTEXITCODE" }
+          if (-not [string]::IsNullOrWhiteSpace(($statusText -join "`n"))) { throw 'Checkout is not clean.' }
+
+          $eolText = @(& $git -C $installDir ls-files --eol -- website/docs/index.mdx)
+          if ($LASTEXITCODE -ne 0) { throw "git ls-files --eol failed with exit code $LASTEXITCODE" }
+          $eol = ($eolText -join "`n").Trim()
+          if ($eol -notmatch '^i/lf\s+w/lf\s+') { throw "Pinned MDX checkout is not LF/LF: $eol" }
+
+          if ([System.IO.File]::ReadAllText($callerGitConfig, [System.Text.Encoding]::UTF8) -cne $callerGitConfigText) { throw 'Caller global Git config was modified.' }
+          if ([System.IO.File]::ReadAllText($callerGitAttributes, [System.Text.Encoding]::UTF8) -cne $callerGitAttributesText) { throw 'Caller global Git attributes were modified.' }
+          if (Test-Path -LiteralPath $fakeGitMarker) { throw 'Hostile PATH Git was executed.' }
+          $staleGitFiles = @(Get-ChildItem -LiteralPath $runtimeRoot -File -Force | Where-Object { $_.Name -match '^git-(?:global-[0-9a-f]{32}\.config|(?:attributes|excludes)-[0-9a-f]{32}\.txt)$' })
+          if ($staleGitFiles.Count -ne 0) { throw 'Ephemeral managed Git files were not removed.' }
+          $staleStageProfiles = @(Get-ChildItem -LiteralPath $runtimeRoot -Directory -Force | Where-Object { $_.Name -match '^stage-profile-[0-9a-f]{32}$' })
+          if ($staleStageProfiles.Count -ne 0) { throw 'Isolated stage profiles were not removed.' }
+
+          "### Hermes Easy Setup E2E`n`n- Scope: core Hermes CLI`n- Release: $($source.hermes.releaseTag)`n- Peeled commit: $head`n- Registry PATH baseline: clean system commands + trusted Git`n- User environment transition: exact`n- Hostile PATH/config/common-dir: overridden`n- Checkout EOL: LF/LF`n- Checkout clean: yes`n- Browser/TUI npm, Computer Use, Desktop, setup, credentials executed: no`n- Result: verified" | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY

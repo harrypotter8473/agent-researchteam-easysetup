@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    needs: [windows, team-and-board, secret-scan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Publish verified installer distributions for a new version
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content VERSION -Raw).Trim()
+          if ($version -cnotmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version' }
+          $tag = 'v' + $version
+          $releases = gh release list --limit 100 --json tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing releases' }
+          if (@($releases | Where-Object tagName -eq $tag).Count -gt 0) { Write-Output 'Existing release preserved'; exit 0 }
+          $out = Join-Path $env:RUNNER_TEMP ('Hermes-release-' + $version)
+          $built = .\Build-Distributions.ps1 -DestinationRoot $out
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.txt'
+          Copy-Item docs/release-notes.ko.md $notes
+          $files = @($built.Packages | ForEach-Object Path) + @($built.Checksums)
+          $releaseOptions = @('--latest')
+          if ($version -cin @('0.18.0','0.19.0','0.20.0')) { $releaseOptions = @('--prerelease', '--latest=false') }
+          gh release create $tag @files --target $env:GITHUB_SHA --title ('NST Research Team Setup ' + $version) --notes-file $notes @releaseOptions
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: NST installer and security regression suites
+        shell: ${{ matrix.shell }}
+        run: .\tests\Run-NstRegression.ps1 -IncludeDistribution
+
+  team-and-board:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pinned research payload bytes after Git checkout
+        shell: powershell
+        run: |
+          python -B team/build_manifest.py --check
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Mattermost board plugin webapp registration
+        shell: powershell
+        run: node tests/test_mattermost_plugin_webapp.cjs
+      - name: Mattermost board plugin server permissions
+        shell: pwsh
+        working-directory: plugins/research-board
+        run: go test -mod=readonly ./server
+      - name: Offline 3+1 board, blind audit, evidence reuse and model routing
+        shell: powershell
+        run: |
+          python -m pip install pyyaml==6.0.3 pytest==8.4.2
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python -B -m unittest discover -s tests -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          python -X utf8 -B -m pytest -q -p no:cacheprovider team/gateway/test_policy.py
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
