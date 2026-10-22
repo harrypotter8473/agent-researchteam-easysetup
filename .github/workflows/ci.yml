@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   release:
-    needs: [windows, team-and-board, secret-scan]
+    needs: [windows-powershell5, windows-powershell7, team-and-board, secret-scan]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 10
@@ -46,19 +46,26 @@ jobs:
           if ($version -cin @('0.18.0','0.19.0','0.20.0')) { $releaseOptions = @('--prerelease', '--latest=false') }
           gh release create $tag @files --target $env:GITHUB_SHA --title ('NST Research Team Setup ' + $version) --notes-file $notes @releaseOptions
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
-  windows:
+  windows-powershell5:
     runs-on: windows-latest
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        shell: [powershell, pwsh]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: NST installer and security regression suites
-        shell: ${{ matrix.shell }}
+        shell: powershell
+        run: .\tests\Run-NstRegression.ps1 -IncludeDistribution
+
+  windows-powershell7:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: NST installer and security regression suites
+        shell: pwsh
         run: .\tests\Run-NstRegression.ps1 -IncludeDistribution
 
   team-and-board:
