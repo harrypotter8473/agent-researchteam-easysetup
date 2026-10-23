@@ -96,10 +96,11 @@ class Journal:
     def emit(self, action, result='', state='info', tool='', detail='', metrics=None):
         with self.lock:
             self.sequence += 1
+            result_limit = 4000 if self.role == 'research-lead' and action in ('후속 계획 판단', '총괄 조치 완료') else 240
             record = {'schema': 1, 'id': self.path.stem + ':' + str(self.sequence),
                       'time': dt.datetime.now(dt.timezone.utc).isoformat(timespec='milliseconds'),
                       'project': self.project, 'task': self.task, 'role': self.role,
-                      'agent': LABELS[self.role], 'action': clean(action, 80), 'result': clean(result),
+                      'agent': LABELS[self.role], 'action': clean(action, 80), 'result': clean(result, result_limit),
                       'state': state if state in ('info', 'running', 'done', 'failed', 'waiting') else 'info',
                       'tool': clean(tool, 80), 'detail': clean(detail)}
             if self.role == 'research-lead':
@@ -239,7 +240,8 @@ def iter_events(home, project=None, role=None, task=None):
                     if project and item.get('project') != project: continue
                     if role and item.get('role') != role: continue
                     if task and item.get('task') != task: continue
-                    row = {k: clean(item.get(k) or '', 256) for k in
+                    result_limit = 4000 if item.get('role') == 'research-lead' and item.get('action') in ('후속 계획 판단', '총괄 조치 완료') else 256
+                    row = {k: clean(item.get(k) or '', result_limit if k == 'result' else 256) for k in
                            ('id', 'time', 'project', 'task', 'role', 'agent', 'action', 'result', 'state', 'tool', 'detail', 'card')}
                     metrics = item.get('metrics')
                     if isinstance(metrics, dict):
@@ -297,7 +299,7 @@ def management_cards(home, project):
         summary = end['result'] or end['action']
         cards.append({'id': 'lead-' + hashlib_card(key), 'title': clean(title, 50),
             'assignee': 'research-lead', 'kind': 'coordination', 'status': state,
-            'summary': clean(summary, 220), 'updated': last['time'], 'started': first['time'],
+            'summary': clean(summary, 4000), 'updated': last['time'], 'started': first['time'],
             'after': [], 'attempt': '1', 'max_attempts': None, 'approval': '', 'outputs': [],
             'audit': '총괄 실행 기록 · 감사 승인과 별개', 'thread': '', 'stop_reason': '',
             'origin_task': first['task'], 'event_count': len(rows),

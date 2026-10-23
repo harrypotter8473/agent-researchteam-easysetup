@@ -84,7 +84,41 @@ def result_summary(report, fallback):
         if re.match(r'^[\w.-]+\.(?:md|json|jsonl|csv|txt|pdf|docx|html|py|png|svg)\s*[:：]', line, re.I): continue
         if re.match(r'^같은\s+(?:notes|sources|reports|evidence|reviews|experiments)[\\/]', line): continue
         lines.append(line)
-    return activity.clean(' · '.join(lines[:2]) if lines else fallback, 220)
+    summary = ' · '.join(lines[:2]) if lines else fallback
+    # This is opened on demand, not squeezed into a card. Keep the complete
+    # saved outcome sentences (the report itself is already a bounded blob).
+    return activity.clean(summary, len(summary))
+
+
+def project_labels(name, marker, request, *, is_validation=False):
+    """Display metadata only. Stable folder names/IDs remain routing keys."""
+    scenarios = {'S1': '문헌검토 보고서', 'S2': '자료 분석 보고서', 'S3': '내부 웹 보고서'}
+    scenario = marker.get('validation') if isinstance(marker, dict) else None
+    if not isinstance(scenario, str): scenario = None
+    if scenario not in scenarios and is_validation:
+        match = re.search(r'[-_](s[123])$', name, re.I)
+        if match: scenario = match[1].upper()
+    if scenario in scenarios:
+        return {'display_name': scenarios[scenario], 'project_label': '설치 검증 ' + scenario}
+    title = marker.get('title') if isinstance(marker, dict) else None
+    if isinstance(title, str) and title.strip():
+        return {'display_name': activity.clean(title.strip(), 240), 'project_label': '연구 프로젝트'}
+    if name == 'reports':
+        return {'display_name': '연구 보고서', 'project_label': '연구 프로젝트'}
+    if is_validation:
+        return {'display_name': '설치 검증 기록', 'project_label': '설치 검증'}
+    lines = [re.sub(r'^\s*(?:#{1,6}\s+|[-*]\s+)', '', line).strip() for line in request.splitlines()]
+    for line in lines:
+        if not line or re.fullmatch(r'(?:REQUEST|Request|원요청|연구 요청|요청)(?:\s*[:：])?', line):
+            continue
+        if re.match(r'^(?:요청\s*ID|Request\s+ID|req_[a-z0-9]+|```|[A-Za-z]:[\\/])', line, re.I):
+            continue
+        line = re.sub(r'[*`]', '', line)
+        title = activity.clean(line, 240)
+        if len(line) > 240: title += '…'
+        return {'display_name': title, 'project_label': '연구 프로젝트'}
+    fallback = '연구 보고서' if name == 'reports' else '연구 프로젝트' if re.fullmatch(r'(?:[a-f0-9]{12,}|req_[\w-]+)', name) else name.replace('_', ' ').replace('-', ' ')
+    return {'display_name': activity.clean(fallback, 240), 'project_label': '연구 프로젝트'}
 
 
 class Board:
@@ -269,6 +303,7 @@ class Board:
                           'summary': result_summary(match[2], '결과가 저장되면 요약을 표시합니다.' if status != 'done' else '작업을 마쳤습니다. 상세 결과를 확인하세요.'),
                           'verdict': own_review[-1]['verdict'] if own_review else None,
                           'after': rb.csv(meta.get('after')), 'updated': meta.get('updated'),
+                          'audit_scope': meta.get('audit_scope', 'intermediate'), 'audit_of': rb.csv(meta.get('audit_of')),
                           'attempt': meta.get('attempt', '0'), 'max_attempts': meta.get('max_attempts'),
                           'claimed_by': meta.get('claimed_by', ''), 'stop_reason': meta.get('stop_reason', ''),
                           'report': activity.redact(match[2][-30000:]), 'thread': meta.get('thread', ''), 'approval': approval,
@@ -282,6 +317,12 @@ class Board:
                 'test': any(p.startswith(('_validation-', '_selftest-')) for p in project.parts),
                 'tasks': tasks, 'audits': audits, 'ledger_intact': chain_ok, 'error': None,
                 'documents': [{'path': name, 'available': True} for name in sorted(files) if output_allowed(name)]}
+        try:
+            marker = json.loads(blob('.tasks/project.json')) if '.tasks/project.json' in files else {}
+        except (ValueError, TypeError):
+            marker = {}
+        request = blob('REQUEST.md').decode('utf-8', 'replace')[:6000] if 'REQUEST.md' in files else ''
+        result.update(project_labels(project.name, marker, request, is_validation=result['test']))
         self.project_cache[key] = (version, result)
         return result
 

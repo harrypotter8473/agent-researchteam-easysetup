@@ -1655,7 +1655,7 @@ def coordinate_event(a, clone, event):
             raise RuntimeError(f"lead event {event_id} exited {proc.returncode}: {(err or out)[-1000:]}")
         current = tasks(clone).get(task)
         thread = current[1].get("thread", "") if current else ""
-        journal.emit('후속 계획 판단', headline(out, 220), 'done')
+        journal.emit('후속 계획 판단', headline(out, 4000), 'done')
         if status in ('blocked', 'failed'):
             Notifier(clone, 'research-lead').post(
                 f'계획 조정 · {task}: {headline(out, 180)}', thread)

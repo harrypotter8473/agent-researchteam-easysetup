@@ -46,6 +46,17 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout.strip()
 
+    def test_display_labels_do_not_change_project_ids_or_file_routing(self):
+        (self.project / 'REQUEST.md').write_text('# Request\n\n공개 논문 비교 보고서\n', encoding='utf-8')
+        (self.project / '.tasks/project.json').write_text(json.dumps({'validation': 'S2'}), encoding='utf-8')
+        self.git('add', '.'); self.git('commit', '-qm', 'readable request')
+        p = self.board.snapshot()['projects'][0]
+        self.assertEqual(p['display_name'], '자료 분석 보고서')
+        self.assertEqual(p['project_label'], '설치 검증 S2')
+        self.assertEqual(p['id'], self.key)
+        self.assertEqual(p['name'], self.project.name)
+        self.assertTrue(self.board.output(self.key, 'reports/report.md', p['commit']))
+
     def test_projects_tasks_saved_files_and_no_secret(self):
         result = self.board.snapshot(); p = result['projects'][0]
         self.assertEqual(p['tasks'][0]['status'], 'running')
