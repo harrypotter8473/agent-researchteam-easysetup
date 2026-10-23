@@ -722,7 +722,7 @@ namespace HermesEasySetup {
     }
 }
 
-function Test-HermesWindowsAppExecutionAlias {
+function Get-HermesAppExecutionAliasRecord {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$LiteralPath,
@@ -731,35 +731,138 @@ function Test-HermesWindowsAppExecutionAlias {
 
     try {
         $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-        if ([string]::IsNullOrWhiteSpace($localAppData)) { return $false }
+        if ([string]::IsNullOrWhiteSpace($localAppData)) { return $null }
         $expected = [System.IO.Path]::GetFullPath((Join-Path $localAppData (Join-Path 'Microsoft\WindowsApps' $ExpectedName)))
         $fullPath = [System.IO.Path]::GetFullPath($LiteralPath)
         if (-not [string]::Equals($fullPath, $expected, [System.StringComparison]::OrdinalIgnoreCase) -or
-            -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { return $false }
+            -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { return $null }
         $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
         if ($item.Length -ne 0 -or
             ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0 -or
-            (Get-HermesReparseTag -LiteralPath $fullPath) -ne [uint32]2147483675) { return $false }
+            (Get-HermesReparseTag -LiteralPath $fullPath) -ne [uint32]2147483675) { return $null }
         $strings = @([HermesEasySetup.ReparsePointInspector]::GetAppExecLinkStrings($fullPath))
-        if ($strings.Count -lt 3) { return $false }
+        if ($strings.Count -lt 3) { return $null }
         $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
         $windowsApps = [System.IO.Path]::GetFullPath((Join-Path $programFiles 'WindowsApps')).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
         $target = [System.IO.Path]::GetFullPath([string]$strings[2])
-        if (-not $target.StartsWith($windowsApps, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        if (-not $target.StartsWith($windowsApps, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+        return [pscustomobject]@{ Family = [string]$strings[0]; Application = [string]$strings[1]; Target = $target }
+    } catch { return $null }
+}
+
+function Test-HermesPythonAppAliasBinding {
+    param([Parameter(Mandatory = $true)]$Record, [switch]$StorePlaceholder)
+    # Pure metadata matching is only called after the OS AppExecLink/path checks.
+    if ($StorePlaceholder) {
+        return ($Record.Family -ceq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -and
+            $Record.Application -ceq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe!PythonRedirector' -and
+            $Record.Target -match '(?i)\\Microsoft\.DesktopAppInstaller_[0-9.]+_(?:x64|x86|arm64)__8wekyb3d8bbwe\\AppInstallerPythonRedirector\.exe$')
+    }
+    if ($Record.Family -cmatch '^PythonSoftwareFoundation\.PythonManager_(qbz5n2kfra8p0|3847v3x7pw1km)$') {
+        $publisher = [regex]::Escape([string]$Matches[1])
+        return ($Record.Application -ceq ($Record.Family + '!Python.Exe') -and
+            $Record.Target -match ('(?i)\\PythonSoftwareFoundation\.PythonManager_[0-9.]+_(?:x64|x86|arm64)__' + $publisher + '\\python\.exe$'))
+    }
+    if ($Record.Family -cmatch '^PythonSoftwareFoundation\.Python\.3\.[0-9]+_qbz5n2kfra8p0$') {
+        $package = [regex]::Escape(($Record.Family -replace '_qbz5n2kfra8p0$', ''))
+        return ($Record.Application -ceq ($Record.Family + '!Python') -and
+            $Record.Target -match ('(?i)\\' + $package + '_[^\\]+__qbz5n2kfra8p0\\python3\.[0-9]+\.exe$'))
+    }
+    return $false
+}
+
+function Test-HermesWindowsAppExecutionAlias {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string]$LiteralPath, [Parameter(Mandatory = $true)][string]$ExpectedName)
+    try {
+        $record = Get-HermesAppExecutionAliasRecord -LiteralPath $LiteralPath -ExpectedName $ExpectedName
+        if ($null -eq $record) { return $false }
         if ($ExpectedName -ceq 'winget.exe') {
-            return ([string]$strings[0] -ceq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -and
-                [string]$strings[1] -ceq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe!winget' -and
-                $target -match '(?i)\\Microsoft\.DesktopAppInstaller_[^\\]+__8wekyb3d8bbwe\\winget\.exe$')
+            return ($record.Family -ceq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe' -and
+                $record.Application -ceq 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe!winget' -and
+                $record.Target -match '(?i)\\Microsoft\.DesktopAppInstaller_[^\\]+__8wekyb3d8bbwe\\winget\.exe$')
         }
         if ($ExpectedName -ceq 'python.exe') {
-            return ([string]$strings[0] -match '^PythonSoftwareFoundation\.Python\.3\.[0-9]+_qbz5n2kfra8p0$' -and
-                [string]$strings[1] -match '^PythonSoftwareFoundation\.Python\.3\.[0-9]+_qbz5n2kfra8p0!Python$' -and
-                $target -match '(?i)\\PythonSoftwareFoundation\.Python\.3\.[0-9]+_[^\\]+__qbz5n2kfra8p0\\python3\.[0-9]+\.exe$')
+            return (Test-HermesPythonAppAliasBinding -Record $record)
         }
         return $false
     } catch {
         return $false
     }
+}
+
+function Test-HermesPythonStorePlaceholder {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $record = Get-HermesAppExecutionAliasRecord -LiteralPath $LiteralPath -ExpectedName 'python.exe'
+    return ($null -ne $record -and (Test-HermesPythonAppAliasBinding -Record $record -StorePlaceholder))
+}
+
+function Get-HermesPythonUserRoots {
+    $local = Get-HermesPythonLocalAppData
+    if (-not [string]::IsNullOrWhiteSpace($local)) { @((Join-Path $local 'Programs\Python'), (Join-Path $local 'Python')) }
+}
+
+function Get-HermesPythonLocalAppData {
+    return [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+}
+
+function Test-HermesSignedPythonRuntime {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $path = [IO.Path]::GetFullPath($LiteralPath)
+    if ((Split-Path -Leaf $path) -ine 'python.exe') { return $false }
+    $roots = @(Get-HermesPythonUserRoots) + @(
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86))
+    foreach ($root in $roots) {
+        if (-not [string]::IsNullOrWhiteSpace($root) -and
+            (Test-HermesOrdinaryCommandPathUnderRoot -LiteralPath $path -RootPath $root) -and
+            (Test-HermesOrdinaryCommandPathUnderRoot -LiteralPath $path -RootPath ([IO.Path]::GetPathRoot($path))) -and
+            (Test-HermesPortableExecutableHeader -LiteralPath $path -MaximumLength 256MB) -and
+            (Test-HermesAuthenticodePublisher -LiteralPath $path -PublisherPattern '(?i)Python Software Foundation')) { return $true }
+    }
+    return $false
+}
+
+function Get-HermesPythonCandidateValidation {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $reason = '허용된 Python 경로·실행 파일·Python Software Foundation 서명을 확인하지 못했습니다.'
+    try {
+        $path = [IO.Path]::GetFullPath($LiteralPath)
+        if ((Split-Path -Leaf $path) -ine 'python.exe') {
+            $reason = 'python.exe 대신 스크립트 또는 다른 이름의 파일이 먼저 선택됩니다.'
+        } elseif (Test-HermesWindowsAppExecutionAlias -LiteralPath $path -ExpectedName 'python.exe') {
+            return [pscustomobject]@{ Valid = $true; Kind = 'PackagePython'; Reason = $null; Path = $path }
+        } elseif (Test-HermesPythonStorePlaceholder -LiteralPath $path) {
+            return [pscustomobject]@{ Valid = $false; Kind = 'StorePlaceholder'; Reason = 'Microsoft Store 설치 바로가기이며 실제 Python이 아닙니다. 실행하지 않습니다.'; Path = $path }
+        } else {
+            $local = Get-HermesPythonLocalAppData
+            $shim = [IO.Path]::GetFullPath((Join-Path $local 'Python\bin\python.exe'))
+            if ([string]::Equals($path, $shim, [StringComparison]::OrdinalIgnoreCase)) {
+                # PyManager aliases are signed launchers with a separate __target__.
+                # Trusting only the launcher's signature would allow target redirection.
+                $sidecar = $path + '.__target__'
+                $scriptFile = $path + '.__script__.py'
+                if (-not (Test-HermesSignedPythonRuntime -LiteralPath $path) -or
+                    -not (Test-HermesOrdinaryCommandPathUnderRoot -LiteralPath $sidecar -RootPath ([IO.Path]::GetPathRoot($sidecar))) -or
+                    (Get-Item -LiteralPath $sidecar -Force).Length -gt 8192 -or
+                    (Test-Path -LiteralPath $scriptFile)) {
+                    $reason = 'Python 관리자 바로가기의 서명·대상 파일을 확인하지 못했거나 별도 실행 스크립트가 있습니다.'
+                } else {
+                    $target = [IO.File]::ReadAllText($sidecar, (New-Object Text.UTF8Encoding($false,$true)))
+                    if ($target -match '[\r\n\x00]' -or $target -notmatch '^[A-Za-z]:\\' -or
+                        [string]::Equals([IO.Path]::GetFullPath($target), $path, [StringComparison]::OrdinalIgnoreCase) -or
+                        -not (Test-HermesSignedPythonRuntime -LiteralPath $target)) {
+                        $reason = 'Python 관리자 바로가기의 대상이 허용된 정품 Python 실행 파일이 아닙니다.'
+                    } else {
+                        return [pscustomobject]@{ Valid = $true; Kind = 'PythonManagerAlias'; Reason = $null; Path = $path }
+                    }
+                }
+            } elseif (Test-HermesSignedPythonRuntime -LiteralPath $path) {
+                return [pscustomobject]@{ Valid = $true; Kind = 'SignedPython'; Reason = $null; Path = $path }
+            }
+        }
+    } catch { $reason = 'Python 경로 검사 중 파일·링크·서명 정보를 안전하게 읽지 못했습니다.' }
+    return [pscustomobject]@{ Valid = $false; Kind = 'Blocked'; Reason = $reason; Path = $LiteralPath }
 }
 
 function Get-HermesTrustedWindowsCommandPath {
@@ -1176,14 +1279,7 @@ function Test-HermesTrustedBareCommandCandidate {
         }
 
         if ($CommandName -eq 'python') {
-            if ($leaf -ieq 'python.exe' -and (Test-HermesWindowsAppExecutionAlias -LiteralPath $candidate -ExpectedName 'python.exe')) { return $true }
-            foreach ($root in $programRoots) {
-                if ($leaf -ieq 'python.exe' -and
-                    (Test-HermesOrdinaryCommandPathUnderRoot -LiteralPath $candidate -RootPath $root) -and
-                    (Test-HermesPortableExecutableHeader -LiteralPath $candidate -MaximumLength 256MB) -and
-                    (Test-HermesAuthenticodePublisher -LiteralPath $candidate -PublisherPattern '(?i)Python Software Foundation')) { return $true }
-            }
-            return $false
+            return [bool](Get-HermesPythonCandidateValidation -LiteralPath $candidate).Valid
         }
 
         if ($CommandName -eq 'uv') {
@@ -1285,6 +1381,7 @@ function Test-HermesStageBareCommandResolution {
     $commands = @()
     $missingCommands = New-Object 'System.Collections.Generic.List[string]'
     $resolvedPaths = New-Object 'System.Collections.Generic.List[string]'
+    $ignoredPythonPaths = New-Object 'System.Collections.Generic.List[string]'
     $configuredCommands = $script:HermesStageBareCommandNames[$Stage]
     if ($null -ne $configuredCommands) { $commands = @($configuredCommands) }
     foreach ($commandName in $commands) {
@@ -1298,13 +1395,29 @@ function Test-HermesStageBareCommandResolution {
             continue
         }
         foreach ($candidate in @($resolution.Candidates)) {
+            # The pinned upstream Python stage explicitly skips WindowsApps
+            # redirectors and uses attested uv to install a managed interpreter.
+            # This exception is NOT an executable-trust grant in other stages.
+            if ($Stage -ceq 'python' -and $commandName -ceq 'python' -and
+                (Test-HermesPythonStorePlaceholder -LiteralPath ([string]$candidate))) {
+                $ignoredPythonPaths.Add([string]$candidate)
+                continue
+            }
             if (-not (Test-HermesTrustedBareCommandCandidate -Plan $Plan -CommandName ([string]$commandName) -LiteralPath ([string]$candidate) -TrustedGitPath $TrustedGitPath -ManagedCommandProof $ManagedCommandProof)) {
-                return [pscustomobject]@{ Valid = $false; Reason = 'untrusted registry PATH command candidate'; Command = [string]$commandName; ResolvedPaths = $resolvedPaths.ToArray(); MissingCommands = $missingCommands.ToArray() }
+                $reason = '허용된 실행 파일·경로·서명 또는 설치 검증 기록을 확인하지 못했습니다.'
+                if ($commandName -ceq 'python') { $reason = [string](Get-HermesPythonCandidateValidation -LiteralPath ([string]$candidate)).Reason }
+                return [pscustomobject]@{ Valid = $false; Reason = $reason; Command = [string]$commandName; BlockedPath = [string]$candidate; ResolvedPaths = $resolvedPaths.ToArray(); MissingCommands = $missingCommands.ToArray() }
             }
             $resolvedPaths.Add([string]$candidate)
         }
     }
-    return [pscustomobject]@{ Valid = $true; Reason = $null; Command = $null; ResolvedPaths = $resolvedPaths.ToArray(); MissingCommands = $missingCommands.ToArray() }
+    return [pscustomobject]@{ Valid = $true; Reason = $null; Command = $null; ResolvedPaths = $resolvedPaths.ToArray(); MissingCommands = $missingCommands.ToArray(); IgnoredPythonPaths = $ignoredPythonPaths.ToArray() }
+}
+
+function Format-HermesCommandResolutionFailure {
+    param([Parameter(Mandatory = $true)][string]$Stage, [Parameter(Mandatory = $true)]$Result)
+    $path = $(if ($Result.PSObject.Properties.Name -contains 'BlockedPath') { [string]$Result.BlockedPath } else { '후보를 확정하지 못함 (PATH 형식 확인 필요)' })
+    return "단계 '$Stage'의 '$($Result.Command)' 실행을 안전 검사에서 차단했습니다. 경로: $path / 이유: $($Result.Reason)"
 }
 
 function Read-HermesBootstrapMarker {
@@ -3081,7 +3194,20 @@ function Invoke-HermesInstall {
             }
             $stageBareCommands = Test-HermesStageBareCommandResolution -Plan $freshPlan -Stage $name -TrustedGitPath $trustedGit -PathValues $stageRegistryPathValues -ManagedCommandProof $managedCommandProof
             if (-not $stageBareCommands.Valid) {
-                Throw-HermesEasySetupError -Message "단계 '$name' 직전 command '$($stageBareCommands.Command)'의 registry PATH 해석이 신뢰 경계를 벗어났습니다." -ExitCode 10 -Category 'Preflight'
+                $failureMessage = Format-HermesCommandResolutionFailure -Stage $name -Result $stageBareCommands
+                Write-HermesEasySetupLog -LiteralPath $logPath -Message $failureMessage
+                Throw-HermesEasySetupError -Message $failureMessage -ExitCode 10 -Category 'Preflight'
+            }
+            if ($name -ceq 'python') {
+                $ignoredPaths = @()
+                if ($stageBareCommands.PSObject.Properties.Name -contains 'IgnoredPythonPaths') { $ignoredPaths = @($stageBareCommands.IgnoredPythonPaths) }
+                foreach ($ignored in $ignoredPaths) {
+                    [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'log' -Stage $name -State 'running' -Message ("실행하지 않는 Microsoft Store Python 바로가기: $ignored. 개인 설정은 변경하지 않고 Hermes용 Python을 준비합니다.") -Percent $percentStart)
+                }
+                foreach ($resolved in @($stageBareCommands.ResolvedPaths | Where-Object { [IO.Path]::GetFileName([string]$_) -ieq 'python.exe' })) {
+                    [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'log' -Stage $name -State 'running' -Message ("인식한 Python 경로: $resolved (패키지 연결 또는 서명·경로 검증 통과).") -Percent $percentStart)
+                }
+                [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'log' -Stage $name -State 'running' -Message 'Python 설치 관리자·기존 경로 검사가 끝났습니다. 검증된 uv로 Hermes 전용 Python 3.11을 확인하고, 없으면 자동 설치합니다. 개인 Python·PATH·서버는 변경하지 않습니다.' -Percent $percentStart)
             }
             if ($name -eq 'system-packages') {
                 $missingOptionalPackages = @($stageBareCommands.MissingCommands | Where-Object { $_ -eq 'rg' -or $_ -eq 'ffmpeg' })

@@ -17,7 +17,7 @@ $common = @('HermesEasySetup.ps1','VERSION','LICENSE','README.md','SECURITY.md',
     'src/HermesEasySetup.Execution.psm1','src/HermesEasySetup.Protocol.psm1','src/HermesEasySetup.InstallEngine.psm1','src/HermesEasySetup.Existing.psm1','src/HermesEasySetup.Codex.psm1',
     'src/HermesEasySetup.Input.psm1','src/HermesEasySetup.Docker.psm1','src/HermesEasySetup.Admin.psm1','src/HermesEasySetup.AdminBots.ps1','src/HermesEasySetup.AdminNetwork.ps1','src/HermesEasySetup.Research.psm1','src/HermesEasySetup.ResearchRuntime.psm1','src/HermesEasySetup.ResearchGovernance.ps1','src/HermesEasySetup.Bundle.psm1',
     'src/HermesEasySetup.ResearchDefaults.ps1','src/HermesEasySetup.ResearchMigration.ps1','src/HermesEasySetup.ResearchGateway.ps1','src/HermesEasySetup.ResearchPlugins.ps1',
-    'docs/research-guide.ko.md','docs/research-team.md','docs/research-board.ko.md','docs/recovery-guide.ko.md','docs/verification-0.19.0.md','docs/verification-0.20.0.md')
+    'docs/research-guide.ko.md','docs/research-team.md','docs/research-board.ko.md','docs/recovery-guide.ko.md','docs/verification-0.19.0.md','docs/verification-0.20.0.md','docs/verification-0.21.1.md')
 $null = Get-HermesResearchTeamPayload
 # The research team payload is exactly what team/manifest.json lists (the installer re-checks every hash).
 $teamManifest = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'team\manifest.json'), [Text.Encoding]::UTF8) | ConvertFrom-Json

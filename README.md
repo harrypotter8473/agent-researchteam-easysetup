@@ -1,4 +1,4 @@
-# NST Research Team Setup 0.21.0
+# NST Research Team Setup 0.21.1
 
 Windows PC에 Mattermost·Hermes·총괄/조사/분석/감사 3+1 연구팀을 구성하는 NST 전용 마법사입니다.
 한국어 작업보드와 NST 브랜딩을 Mattermost 안에 연결합니다.
@@ -38,7 +38,7 @@ Mattermost에는 중요한 보고와 결과만 남기고, 왼쪽 **연구 작업
 - PowerShell: `tests/Run-NstRegression.ps1 -IncludeDistribution` (Windows PowerShell 5.1 및 PowerShell 7).
 - Python: `python -B team/build_manifest.py --check`, `python -B -m unittest discover -s tests -p 'test_*.py' -v`.
 - 보드·플러그인: `node tests/test_board_ui.cjs`, `node tests/test_mattermost_plugin_webapp.cjs`, Go server tests.
-- 배포: `Build-Distributions.ps1 -DestinationRoot <소스 밖 별도 폴더>` → `NST-Research-Team-Setup-0.21.0.zip`과 SHA256SUMS.txt.
+- 배포: `Build-Distributions.ps1 -DestinationRoot <소스 밖 별도 폴더>` → `NST-Research-Team-Setup-0.21.1.zip`과 SHA256SUMS.txt.
 
 [설치 안내](docs/research-guide.ko.md) · [연구팀 구조](docs/research-team.md) · [작업보드](docs/research-board.ko.md) ·
-[플러그인](docs/mattermost-plugins.ko.md) · [복구](docs/recovery-guide.ko.md) · [검증 범위](docs/verification-0.20.0.md)
+[플러그인](docs/mattermost-plugins.ko.md) · [복구](docs/recovery-guide.ko.md) · [검증 범위](docs/verification-0.21.1.md)
