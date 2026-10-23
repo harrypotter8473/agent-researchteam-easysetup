@@ -1617,6 +1617,7 @@ def coordinate_event(a, clone, event):
     try:
         journal = activity.Journal(TEAM_HOME, activity_project(clone), task, 'research-lead')
         journal.emit('후속 계획 판단', '작업 결과·감사·실패 원인을 읽고 다음 조치를 결정', 'running')
+        env['RESEARCH_LEAD_CARD_ID'] = journal.card
         proc = popen_group(activity.stream_command(cmd), cwd=clone, env=env, stdout=sp.PIPE, stderr=sp.PIPE,
                            encoding="utf-8", errors="replace")
         out, err, exit_code = activity.capture(proc, journal, a.task_timeout, kill_tree)
@@ -1634,8 +1635,47 @@ def coordinate_event(a, clone, event):
                 f'계획 조정 · {task}: {headline(out, 180)}', thread)
         print(f"[{now()}] lead handled {clone.name}/{task}/{status}: {headline(out)}", flush=True)
         return True
+    except BaseException as exc:
+        if 'journal' in locals():
+            journal.emit('후속 계획 판단', activity.failure_reason(str(exc)), 'failed')
+        raise
     finally:
         query.unlink(missing_ok=True)
+
+
+def tracked_lead_command(a):
+    """Register real lead commands without adding runnable/approval ledger entries.
+
+    A coordinator turn is one card; its child commands join that card. Direct
+    gateway planning/publishing/delivery gets its own durable observation card.
+    """
+    labels = {'new': '업무 배정', 'edit': '계획 조정', 'publish': '기준·문서 정리',
+              'deliver': '결과 전달', 'project-create': '연구 계획', 'approve': '사용자 승인 기록'}
+    if a.cmd not in labels:
+        return a.fn(a)
+    if re.fullmatch(r'[A-Za-z0-9-]{1,96}', os.environ.get('RESEARCH_LEAD_CARD_ID', '')):
+        return a.fn(a)
+    project = activity_project(Path(a.paper)) if hasattr(a, 'paper') else a.name
+    journal = activity.Journal(TEAM_HOME, project, getattr(a, 'id', a.cmd), 'research-lead')
+    old = os.environ.get('RESEARCH_LEAD_CARD_ID')
+    os.environ['RESEARCH_LEAD_CARD_ID'] = journal.card
+    label = labels[a.cmd]
+    detail = (activity.LABELS.get(getattr(a, 'assignee', ''), '') + ' · ' + getattr(a, 'id', '')).strip(' ·')
+    if a.cmd == 'publish': detail = '저장: ' + ', '.join(a.paths)
+    if a.cmd == 'deliver': detail = '검수·첨부 확인: ' + ', '.join(a.items)
+    journal.emit('총괄 조치 시작', label, 'running', detail=detail)
+    try:
+        value = a.fn(a)
+    except BaseException as exc:
+        ok = isinstance(exc, SystemExit) and exc.code in (None, 0)
+        journal.emit('총괄 조치 완료', detail or label if ok else activity.failure_reason(str(exc)), 'done' if ok else 'failed')
+        raise
+    else:
+        journal.emit('총괄 조치 완료', detail or label, 'done')
+        return value
+    finally:
+        if old is None: os.environ.pop('RESEARCH_LEAD_CARD_ID', None)
+        else: os.environ['RESEARCH_LEAD_CARD_ID'] = old
 
 
 def coordinate_with_retry(a, clone, event, errors, error_path):
@@ -2075,7 +2115,7 @@ def main():
 
     a = ap.parse_args()
     try:
-        a.fn(a)
+        tracked_lead_command(a)
     except RuntimeError as e:
         die(str(e))
 

@@ -4,7 +4,9 @@ One journal per producer process avoids cross-runner append races. Raw prompts,
 tool outputs, environment variables and model reasoning are never published.
 """
 import collections
+import base64
 import datetime as dt
+import heapq
 import json
 import os
 from pathlib import Path
@@ -88,6 +90,8 @@ class Journal:
         self.path = folder / (str(os.getpid()) + '-' + uuid.uuid4().hex + '.jsonl')
         self.lock = threading.Lock()
         self.sequence = 0
+        parent = os.environ.get('RESEARCH_LEAD_CARD_ID', '') if role == 'research-lead' else ''
+        self.card = parent if re.fullmatch(r'[A-Za-z0-9-]{1,96}', parent) else self.path.stem
 
     def emit(self, action, result='', state='info', tool='', detail='', metrics=None):
         with self.lock:
@@ -98,6 +102,8 @@ class Journal:
                       'agent': LABELS[self.role], 'action': clean(action, 80), 'result': clean(result),
                       'state': state if state in ('info', 'running', 'done', 'failed', 'waiting') else 'info',
                       'tool': clean(tool, 80), 'detail': clean(detail)}
+            if self.role == 'research-lead':
+                record['card'] = self.card
             if metrics:
                 record['metrics'] = {k: max(0, int(v)) for k, v in metrics.items()
                                      if k in ('input', 'output', 'total', 'cache_read', 'cache_write', 'duration_ms')
@@ -203,24 +209,102 @@ def capture(proc, journal, timeout, kill, heartbeat=60):
     return final if final is not None else ''.join(out), ''.join(err), 124 if expired else proc.returncode
 
 
-def read_events(home, project=None, limit=500):
-    """Read bounded tails; a partial write is ignored until the next poll."""
-    rows = []
+def event_key(item):
+    return (str(item.get('time') or ''), str(item.get('id') or ''))
+
+
+def iter_events(home, project=None, role=None, task=None):
+    """Filter BEFORE selection. Scan all journals, not just recent file tails.
+
+    Memory is bounded by the requested page, not the age/size of the archive.
+    Partial last lines and invalid records are ignored; logs are never deleted.
+    """
     folder = Path(home) / 'activity'
-    if not folder.is_dir(): return []
-    for path in sorted(folder.glob('*.jsonl'), key=lambda p: p.stat().st_mtime, reverse=True)[:100]:
+    if role is not None and role not in ROLES: raise ValueError('Unknown role')
+    if not folder.is_dir(): return
+    for path in folder.glob('*.jsonl'):
         if path.is_symlink(): continue
         try:
             with path.open('rb') as stream:
-                stream.seek(max(0, path.stat().st_size - 256 * 1024))
-                raw = stream.read(256 * 1024)
-            for line in raw.splitlines():
-                try: item = json.loads(line)
-                except ValueError: continue
-                if item.get('schema') != 1 or item.get('role') not in ROLES: continue
-                if project and item.get('project') != project: continue
-                # Never pass through unrecognized fields from tampered files.
-                rows.append({k: item.get(k) for k in ('id', 'time', 'project', 'task', 'role', 'agent',
-                                                     'action', 'result', 'state', 'tool', 'detail', 'metrics')})
+                while True:
+                    line = stream.readline(1024 * 1024 + 1)
+                    if not line: break
+                    if len(line) > 1024 * 1024:
+                        while line and not line.endswith(b'\n'): line = stream.readline(1024 * 1024)
+                        continue
+                    if not line.endswith(b'\n'): continue
+                    try: item = json.loads(line)
+                    except (ValueError, UnicodeDecodeError): continue
+                    if not isinstance(item, dict) or item.get('schema') != 1 or item.get('role') not in ROLES: continue
+                    if project and item.get('project') != project: continue
+                    if role and item.get('role') != role: continue
+                    if task and item.get('task') != task: continue
+                    row = {k: clean(item.get(k) or '', 256) for k in
+                           ('id', 'time', 'project', 'task', 'role', 'agent', 'action', 'result', 'state', 'tool', 'detail', 'card')}
+                    metrics = item.get('metrics')
+                    if isinstance(metrics, dict):
+                        row['metrics'] = {k: max(0, int(v)) for k, v in metrics.items()
+                            if k in ('input', 'output', 'total', 'cache_read', 'cache_write', 'duration_ms')
+                            and isinstance(v, (int, float))}
+                    yield row
         except OSError: continue
-    return sorted(rows, key=lambda x: (x.get('time') or '', x.get('id') or ''))[-limit:]
+
+
+def read_page(home, project=None, role=None, task=None, before=None, limit=100):
+    if not isinstance(limit, int) or not 1 <= limit <= 500: raise ValueError('Page size must be 1..500')
+    cursor = None
+    if before:
+        try:
+            if len(before) > 1024: raise ValueError('Cursor too long')
+            cursor = json.loads(base64.urlsafe_b64decode(before + '=' * (-len(before) % 4)))
+            if not isinstance(cursor, list) or len(cursor) != 2 or any(not isinstance(x, str) for x in cursor):
+                raise ValueError('Invalid cursor')
+            cursor = tuple(cursor)
+        except (ValueError, TypeError, UnicodeDecodeError): raise ValueError('Invalid cursor') from None
+    source = (r for r in iter_events(home, project, role, task) if cursor is None or event_key(r) < cursor)
+    chosen = heapq.nlargest(limit + 1, source, key=event_key)
+    more = len(chosen) > limit
+    rows = list(reversed(chosen[:limit]))
+    next_cursor = base64.urlsafe_b64encode(json.dumps(event_key(rows[0])).encode()).decode().rstrip('=') if rows and more else None
+    return {'events': rows, 'has_more': more, 'next_cursor': next_cursor}
+
+
+def read_events(home, project=None, limit=500, role=None, task=None):
+    # Compatibility for existing callers; pagination API is used by the board.
+    if limit < 1: return []
+    return sorted(heapq.nlargest(limit, iter_events(home, project, role, task), key=event_key), key=event_key)
+
+
+def management_cards(home, project):
+    """Real lead work, durably registered by its append-only journal.
+
+    These are observation cards, never runner tasks, ledger results or approvals.
+    Legacy journals are also readable without rewriting project Git history.
+    """
+    grouped = {}
+    for row in iter_events(home, project, 'research-lead'):
+        key = row.get('card') or row['id'].rsplit(':', 1)[0]
+        grouped.setdefault(key, []).append(row)
+    cards = []
+    for key, rows in grouped.items():
+        rows.sort(key=event_key)
+        first, last = rows[0], rows[-1]
+        completed = [r for r in rows if r['action'] in ('후속 계획 판단', '총괄 조치 완료') and r['state'] in ('done', 'failed')]
+        end = completed[-1] if completed else last
+        started = any(r['action'] in ('후속 계획 판단', '총괄 조치 시작') and r['state'] == 'running' for r in rows)
+        state = end['state'] if completed else 'failed' if last['state'] == 'failed' else 'running' if started else end['state'] if end['state'] in ('done', 'failed') else 'done'
+        title = first['result'] if first['action'] == '총괄 조치 시작' else '후속 판단' if any(r['action'] == '후속 계획 판단' for r in rows) else '업무 배정' if any(r['action'] == '작업 배정' for r in rows) else '결과 전달' if any(r['action'] == '최종 파일 전달' for r in rows) else '계획 조정' if any(r['action'] == '계획·작업 변경' for r in rows) else '총괄 조치'
+        summary = end['result'] or end['action']
+        cards.append({'id': 'lead-' + hashlib_card(key), 'title': clean(title, 50),
+            'assignee': 'research-lead', 'kind': 'coordination', 'status': state,
+            'summary': clean(summary, 220), 'updated': last['time'], 'started': first['time'],
+            'after': [], 'attempt': '1', 'max_attempts': None, 'approval': '', 'outputs': [],
+            'audit': '총괄 실행 기록 · 감사 승인과 별개', 'thread': '', 'stop_reason': '',
+            'origin_task': first['task'], 'event_count': len(rows),
+            'report': '\n'.join(f"{r['time']} | {r['action']} | {r['result']}" for r in rows)})
+    return cards
+
+
+def hashlib_card(value):
+    import hashlib
+    return hashlib.sha256(value.encode()).hexdigest()[:20]

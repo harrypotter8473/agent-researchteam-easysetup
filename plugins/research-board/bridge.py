@@ -17,8 +17,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ROUTES = {'/api/projects': set(), '/api/activity': {'project'},
-          '/api/output': {'project', 'path', 'commit', 'preview'}, '/api/log': {'project'}}
+ROUTES = {'/api/projects': set(), '/api/activity': {'project', 'role', 'task', 'before', 'limit'},
+          '/api/output': {'project', 'path', 'commit', 'preview'},
+          '/api/log': {'project', 'role', 'task', 'before', 'limit'}}
 MAX_BYTES = 21 * 1024 * 1024
 
 
@@ -28,6 +29,12 @@ def validate_query(path, query):
     values = urllib.parse.parse_qs(query, keep_blank_values=True, strict_parsing=True)
     if set(values) - ROUTES[path] or any(len(v) != 1 or re.search(r'[\x00-\x1f]', v[0]) for v in values.values()):
         raise ValueError('query rejected')
+    if 'role' in values and values['role'][0] not in ('', 'research-lead', 'research-scout', 'research-worker', 'research-reviewer'):
+        raise ValueError('role rejected')
+    if 'limit' in values and (not values['limit'][0].isdigit() or not 1 <= int(values['limit'][0]) <= 500):
+        raise ValueError('page size rejected')
+    if 'before' in values and (len(values['before'][0]) > 1024 or not re.fullmatch(r'[A-Za-z0-9_-]+', values['before'][0])):
+        raise ValueError('cursor rejected')
 
 
 def process_alive(pid):

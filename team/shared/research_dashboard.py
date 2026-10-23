@@ -5,6 +5,7 @@ Git snapshots are read without checkout/pull. The page cannot grant an audit pas
 edit a task, run a tool or expose credentials, agent memory or raw process logs.
 """
 import argparse
+from collections import OrderedDict
 import hashlib
 import http.server
 import importlib.util
@@ -52,12 +53,95 @@ def audit_input_allowed(path):
         and output_allowed(str(p.parent) + '/marker'))
 
 
+def preferred_port(home, requested):
+    """Keep existing local progress links usable across an owned restart."""
+    if requested: return requested
+    try:
+        record = json.loads((Path(home) / 'dashboard.json').read_text(encoding='utf-8-sig'))
+        match = re.fullmatch(r'http://127\.0\.0\.1:([1-9][0-9]{0,4})/', record['url'])
+        if match and 1024 <= int(match[1]) <= 65535: return int(match[1])
+    except (OSError, ValueError, KeyError, TypeError): pass
+    return 0
+
+
+def result_summary(report, fallback):
+    """A deterministic summary of saved results, never an extra model call."""
+    parts = re.split(r'(?m)^## Result[^\n]*\n', report)
+    text = parts[-1] if len(parts) > 1 else ''
+    text = re.sub(r'```.*?```', '', text, flags=re.S)
+    lines = []
+    for line in text.splitlines():
+        if line.lstrip().startswith('#'): continue
+        line = re.sub(r'^\s*(?:(?:[*>+\-]|\d+[.)])\s+)+', '', line).strip()
+        if not line or line.startswith(('STATUS:', 'status:', '|', '---')): continue
+        if re.match(r'^(요청(?:\s|:)|작업\s+[A-Za-z0-9_-]+|감사\s+[A-Za-z0-9_-]+|상태:|Request\b|Task\b)', line, re.I): continue
+        line = re.sub(r'[*`_]', '', line)
+        # A file inventory is not a human-readable outcome. Full paths and the
+        # unabridged report remain available in the detail and file panels.
+        if line.endswith((':', '：')): continue
+        if re.fullmatch(r'(?:산출물|결과 파일|저장 위치|수행 결과|확인 결과)(?:\s+v\d+)?', line): continue
+        if re.match(r'^(?:[A-Za-z]:[\\/]|[/\\]{1,2}|(?:notes|sources|reports|evidence|reviews|experiments)[\\/])', line): continue
+        if re.match(r'^[\w.-]+\.(?:md|json|jsonl|csv|txt|pdf|docx|html|py|png|svg)\s*[:：]', line, re.I): continue
+        if re.match(r'^같은\s+(?:notes|sources|reports|evidence|reviews|experiments)[\\/]', line): continue
+        lines.append(line)
+    return activity.clean(' · '.join(lines[:2]) if lines else fallback, 220)
+
+
 class Board:
     def __init__(self, workspace, home):
         self.workspace, self.home = Path(workspace).resolve(), Path(home).resolve()
         self.lock = threading.Lock()
         self.cached, self.cached_at = None, 0
         self.project_cache = {}
+        # Git blobs are immutable across commits. Keep only their small SHA256
+        # digests, never PDFs/images in memory, and still bind every path/version.
+        self.digest_cache = OrderedDict()
+        self.content_cache = OrderedDict()
+        self.content_cache_bytes = 0
+
+    def digests(self, repo, objects):
+        keys = {path: (str(repo), oid) for path, oid in objects.items()}
+        values = {key: self.digest_cache[key] for key in keys.values() if key in self.digest_cache}
+        missing = sorted({key[1] for key in keys.values() if key not in values})
+        if missing:
+            checked = subprocess.run(['git', '-C', str(repo), 'cat-file', '--batch-check'],
+                input=('\n'.join(missing) + '\n').encode('ascii'), capture_output=True, timeout=20)
+            rows = checked.stdout.decode('ascii').splitlines()
+            if checked.returncode or len(rows) != len(missing): raise ValueError('Git blob size check failed')
+            pending, batch_bytes = [], 0
+            def read_batch():
+                if not pending: return
+                read = subprocess.run(['git', '-C', str(repo), 'cat-file', '--batch'],
+                    input=('\n'.join(oid for oid, _ in pending) + '\n').encode('ascii'),
+                    capture_output=True, timeout=20)
+                if read.returncode: raise ValueError('Git blob batch read failed')
+                offset = 0
+                for oid, size in pending:
+                    end = read.stdout.find(b'\n', offset)
+                    expected = f'{oid} blob {size}'.encode('ascii')
+                    if end < 0 or read.stdout[offset:end] != expected: raise ValueError('Git blob header mismatch')
+                    start = end + 1; stop = start + size
+                    if read.stdout[stop:stop+1] != b'\n': raise ValueError('Git blob truncated')
+                    values[(str(repo), oid)] = hashlib.sha256(memoryview(read.stdout)[start:stop]).hexdigest()
+                    offset = stop + 1
+                if offset != len(read.stdout): raise ValueError('Unexpected Git blob bytes')
+            for oid, row in zip(missing, rows):
+                fields = row.split()
+                if len(fields) != 3 or fields[:2] != [oid, 'blob'] or not fields[2].isdigit():
+                    raise ValueError('Invalid Git blob metadata')
+                size = int(fields[2])
+                if size > MAX_BYTES:
+                    values[(str(repo), oid)] = None  # Oversized inputs cannot acquire a current audit badge.
+                    continue
+                if pending and (batch_bytes + size > MAX_BYTES or len(pending) >= 256):
+                    read_batch(); pending, batch_bytes = [], 0
+                pending.append((oid, size)); batch_bytes += size
+            read_batch()
+        for key, value in values.items():
+            self.digest_cache[key] = value
+            self.digest_cache.move_to_end(key)
+        while len(self.digest_cache) > 8192: self.digest_cache.popitem(last=False)
+        return {path: values[key] for path, key in keys.items()}
 
     def projects(self):
         if not self.workspace.is_dir(): return {}
@@ -102,10 +186,25 @@ class Board:
         if cached and cached[0] == version:
             return cached[1]
         tree = git(repo, '-c', 'core.quotepath=false', 'ls-tree', '-r', commit).splitlines()
-        files = {line.split('\t', 1)[1] for line in tree if line.startswith('100') and '\t' in line}
+        objects = {line.split('\t', 1)[1]: line.split('\t', 1)[0].split()[2]
+                   for line in tree if line.startswith('100') and '\t' in line}
+        files = set(objects)
         raw_cache = {}
         def blob(path):
-            if path not in raw_cache: raw_cache[path] = self.blob(repo, commit, path)
+            if path not in raw_cache:
+                key = (str(repo), objects[path])
+                if key in self.content_cache:
+                    raw_cache[path] = self.content_cache[key]
+                    self.content_cache.move_to_end(key)
+                else:
+                    raw_cache[path] = self.blob(repo, commit, path)
+                    size = len(raw_cache[path])
+                    if size <= 256 * 1024:
+                        self.content_cache[key] = raw_cache[path]
+                        self.content_cache_bytes += size
+                        while self.content_cache_bytes > 8 * 1024 * 1024:
+                            _, removed = self.content_cache.popitem(last=False)
+                            self.content_cache_bytes -= len(removed)
             return raw_cache[path]
         ledger_lines = blob(rb.LEDGER).decode('utf-8', 'replace').splitlines() if rb.LEDGER in files else []
         chain_ok = rb.ledger_check(ledger_lines) is None
@@ -114,9 +213,22 @@ class Board:
             try: ledger.append(json.loads(line))
             except ValueError: pass
         latest = {entry.get('task'): entry for entry in ledger}
+        audit_names = sorted(name for name in files if re.fullmatch(r'\.tasks/audits/[A-Za-z0-9._-]+\.json', name))
+        bound_objects = {}
+        for name in audit_names:
+            try:
+                receipt = json.loads(blob(name))
+                if not isinstance(receipt, dict) or receipt.get('verdict') != 'pass': continue
+                for path in receipt.get('files', {}):
+                    if audit_input_allowed(path) and path in objects: bound_objects[path] = objects[path]
+                for tid in receipt.get('target_versions', {}):
+                    if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', tid):
+                        path = f'.tasks/{tid}.md'
+                        if path in objects: bound_objects[path] = objects[path]
+            except (ValueError, TypeError, KeyError): pass
+        digests = self.digests(repo, bound_objects)
         audits = []
-        for name in sorted(files):
-            if not re.fullmatch(r'\.tasks/audits/[A-Za-z0-9._-]+\.json', name): continue
+        for name in audit_names:
             try:
                 receipt = json.loads(blob(name))
                 rb.audit_gate.validate_result(receipt, {k: receipt[k] for k in ('verdict', 'checks', 'findings', 'notes')})
@@ -124,11 +236,11 @@ class Board:
                 versions = receipt.get('target_versions', {})
                 valid = valid and set(versions) == set(receipt.get('targets', [])) and bool(versions)
                 for path, digest in receipt.get('files', {}).items():
-                    if not audit_input_allowed(path) or path not in files or hashlib.sha256(blob(path)).hexdigest() != digest:
+                    if not audit_input_allowed(path) or path not in files or digests.get(path) != digest:
                         valid = False
                 for tid, digest in versions.items():
                     path = f'.tasks/{tid}.md'
-                    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', tid) or path not in files or hashlib.sha256(blob(path)).hexdigest() != digest:
+                    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', tid) or path not in files or digests.get(path) != digest:
                         valid = False
                 audits.append({'task': PurePosixPath(name).stem.rsplit('-', 1)[0],
                                'scope': receipt.get('scope'), 'verdict': receipt.get('verdict'),
@@ -150,6 +262,12 @@ class Board:
             status = meta.get('status', 'unknown')
             approval = ('사용자 결정 필요' if status in ('done', 'blocked') and meta.get('gate') == 'human' else '')
             tasks.append({'id': tid, 'assignee': meta.get('assignee'), 'status': status,
+                          'kind': 'task', 'title': '최종 검토' if meta.get('assignee') == 'research-reviewer' and meta.get('audit_scope') == 'final' else
+                              '근거 검토' if meta.get('assignee') == 'research-reviewer' else
+                              '자료 조사' if meta.get('assignee') == 'research-scout' else
+                              '화면 제작' if any(n.endswith('.html') for n in names) else '분석·보고서',
+                          'summary': result_summary(match[2], '결과가 저장되면 요약을 표시합니다.' if status != 'done' else '작업을 마쳤습니다. 상세 결과를 확인하세요.'),
+                          'verdict': own_review[-1]['verdict'] if own_review else None,
                           'after': rb.csv(meta.get('after')), 'updated': meta.get('updated'),
                           'attempt': meta.get('attempt', '0'), 'max_attempts': meta.get('max_attempts'),
                           'claimed_by': meta.get('claimed_by', ''), 'stop_reason': meta.get('stop_reason', ''),
@@ -162,7 +280,8 @@ class Board:
                           'outputs': [{'path': n, 'available': n in files} for n in names if output_allowed(n)]})
         result = {'id': key, 'name': project.name, 'path': str(project), 'commit': commit, 'source': source,
                 'test': any(p.startswith(('_validation-', '_selftest-')) for p in project.parts),
-                'tasks': tasks, 'audits': audits, 'ledger_intact': chain_ok, 'error': None}
+                'tasks': tasks, 'audits': audits, 'ledger_intact': chain_ok, 'error': None,
+                'documents': [{'path': name, 'available': True} for name in sorted(files) if output_allowed(name)]}
         self.project_cache[key] = (version, result)
         return result
 
@@ -171,7 +290,11 @@ class Board:
             if self.cached is not None and time.monotonic() - self.cached_at < 2: return self.cached
             projects = []
             for key, path in self.projects().items():
-                try: projects.append(self.project(key, path))
+                try:
+                    project = dict(self.project(key, path))
+                    # Management observations have no Git ledger/audit authority.
+                    project['tasks'] = project['tasks'] + activity.management_cards(self.home, path.name)
+                    projects.append(project)
                 except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
                     projects.append({'id': key, 'name': path.name, 'tasks': [], 'error': activity.clean(exc), 'test': False})
             service, validation = {}, {'passed': False, 'state': '미검증'}
@@ -241,7 +364,10 @@ def handler(board):
                 if url.path == '/api/projects':
                     data = board.snapshot()
                 elif url.path == '/api/activity':
-                    data = {'events': activity.read_events(board.home, q.get('project', [None])[0]), 'updated': rb.now()}
+                    data = activity.read_page(board.home, q.get('project', [None])[0],
+                        q.get('role', [None])[0] or None, q.get('task', [None])[0] or None,
+                        q.get('before', [None])[0], int(q.get('limit', ['100'])[0]))
+                    data['updated'] = rb.now()
                 elif url.path == '/api/output':
                     path = q['path'][0]
                     raw = board.output(q['project'][0], path, q['commit'][0])
@@ -251,7 +377,9 @@ def handler(board):
                         return self.reply(200, raw[:200000], 'text/plain; charset=utf-8')
                     return self.reply(200, raw, 'application/octet-stream', PurePosixPath(path).name)
                 elif url.path == '/api/log':
-                    rows = activity.read_events(board.home, q.get('project', [None])[0])
+                    rows = activity.read_page(board.home, q.get('project', [None])[0],
+                        q.get('role', [None])[0] or None, q.get('task', [None])[0] or None,
+                        q.get('before', [None])[0], int(q.get('limit', ['500'])[0]))['events']
                     text = '\n'.join(f"{r['time']} | {r['agent']} | {r['project']}/{r['task']} | {r['action']} | {r['detail']} | {r['result']}" for r in rows)
                     return self.reply(200, text.encode(), 'text/plain; charset=utf-8', 'research-activity.txt')
                 else: return self.reply(404, b'Not found', 'text/plain')
@@ -269,7 +397,14 @@ def main():
     args = parser.parse_args()
     board = Board(args.workspace, args.home)
     if not 0 <= args.port <= 65535: parser.error('port must be 0..65535')
-    server = http.server.ThreadingHTTPServer(('127.0.0.1', args.port), handler(board))
+    port = preferred_port(board.home, args.port)
+    try:
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', port), handler(board))
+    except OSError:
+        if args.port or not port: raise
+        # Another application may legitimately have taken the old port. Never
+        # stop it or expose the board elsewhere; choose a new loopback port.
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler(board))
     url = f'http://127.0.0.1:{server.server_port}/'
     rb.write_state(board.home / 'dashboard.json', {'url': url, 'pid': os.getpid(), 'parent': os.getppid(),
                    'instance': os.environ.get('RESEARCH_PROCESS_INSTANCE', ''), 'started': rb.now()})

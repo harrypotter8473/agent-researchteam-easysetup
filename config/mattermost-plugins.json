@@ -3,9 +3,9 @@
   "packages": [
     {
       "id": "com.hermes.research-board",
-      "version": "0.1.2",
-      "file": "com.hermes.research-board-0.1.2.tar.gz",
-      "sha256": "10fe31976227dcf9598ede9d734e988644ce23d11261910c9875fb3407a8f92c"
+      "version": "0.2.1",
+      "file": "com.hermes.research-board-0.2.1.tar.gz",
+      "sha256": "0fbc6aab05d805bb4ca57b6f3916011b81d2810746e666e8bcb9f649899a56f5"
     },
     {
       "id": "com.nst.wordmark",
@@ -16,6 +16,6 @@
   ],
   "bridge": {
     "path": "plugins/research-board/bridge.py",
-    "sha256": "e4eaf4d99c9ae079c4e552c20dad803c4af223da7bccb9bcf88d3fb87460bcbf"
+    "sha256": "c51694a62bad84d3363768240c694dcc93f2baede5f1878af783004ab7a20fe5"
   }
 }

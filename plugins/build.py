@@ -36,6 +36,10 @@ def main():
     target = ROOT / 'assets/mattermost-plugins' / f"{manifest['id']}-{manifest['version']}.tar.gz"
     target.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, GOOS='linux', GOARCH='amd64', CGO_ENABLED='0', GOTOOLCHAIN='local')
+    # One UI source for standalone and Mattermost; never ship a stale copy.
+    for name in ('index.html', 'app.js', 'app.css'):
+        source = ROOT / 'team/shared/board-ui' / name
+        (PLUGIN / 'server/board-ui' / name).write_bytes(source.read_bytes())
     with tempfile.TemporaryDirectory(prefix='research-plugin-build-') as temp:
         binary = Path(temp) / 'plugin-linux-amd64'
         subprocess.run([args.go, 'build', '-mod=readonly', '-trimpath', '-buildvcs=false',

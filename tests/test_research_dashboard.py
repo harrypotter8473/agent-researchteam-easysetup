@@ -59,6 +59,95 @@ class DashboardTests(unittest.TestCase):
         (self.project / 'reports/report.md').write_text('UNCOMMITTED')
         self.assertNotIn(b'UNCOMMITTED', self.board.output(self.key, 'reports/report.md', p['commit']))
 
+    def test_blob_digest_batch_reuses_only_exact_immutable_versions(self):
+        oid = self.git('rev-parse', 'HEAD:reports/report.md')
+        expected = hashlib.sha256((self.project / 'reports/report.md').read_bytes()).hexdigest()
+        with patch.object(dashboard.subprocess, 'run', wraps=sp.run) as run:
+            self.assertEqual(self.board.digests(self.project, {'one': oid, 'alias': oid}), {'one': expected, 'alias': expected})
+            self.assertEqual(run.call_count, 2)  # One size batch + one bounded data batch.
+            self.assertEqual(self.board.digests(self.project, {'one': oid}), {'one': expected})
+            self.assertEqual(run.call_count, 2)
+        (self.project / 'reports/report.md').write_bytes(b'new\x00version\n')
+        self.git('add', '.'); self.git('commit', '-qm', 'new input version')
+        newer = self.git('rev-parse', 'HEAD:reports/report.md')
+        self.assertNotEqual(newer, oid)
+        result = self.board.digests(self.project, {'one': newer})
+        self.assertEqual(result['one'], hashlib.sha256(b'new\x00version\n').hexdigest())
+        self.assertNotEqual(result['one'], expected)
+
+    def test_blob_batch_is_bounded_and_does_not_accept_oversized_input(self):
+        objects = {}
+        for n in range(4): (self.project / f'reports/f{n}.txt').write_bytes(bytes([n]) * 40)
+        (self.project / 'reports/large.txt').write_bytes(b'x' * 70)
+        self.git('add', '.'); self.git('commit', '-qm', 'bounded binary inputs')
+        for name in ['large'] + [f'f{n}' for n in range(4)]:
+            objects[name] = self.git('rev-parse', f'HEAD:reports/{name}.txt')
+        with patch.object(dashboard, 'MAX_BYTES', 64), patch.object(dashboard.subprocess, 'run', wraps=sp.run) as run:
+            results = self.board.digests(self.project, objects)
+        self.assertIsNone(results['large'])
+        self.assertEqual(run.call_count, 5)  # One metadata call plus four <=64-byte batches.
+        for n in range(4): self.assertEqual(results[f'f{n}'], hashlib.sha256(bytes([n]) * 40).hexdigest())
+
+    def test_blob_batch_rejects_truncated_bytes_without_caching_a_pass(self):
+        oid = self.git('rev-parse', 'HEAD:reports/report.md')
+        metadata = sp.CompletedProcess([], 0, f'{oid} blob 10\n'.encode(), b'')
+        broken = sp.CompletedProcess([], 0, f'{oid} blob 10\nshort'.encode(), b'')
+        with patch.object(dashboard.subprocess, 'run', side_effect=[metadata, broken]):
+            with self.assertRaises(ValueError): self.board.digests(self.project, {'file': oid})
+        self.assertFalse(self.board.digest_cache)
+
+    def test_small_control_cache_does_not_return_an_older_task_version(self):
+        with patch.object(self.board, 'blob', wraps=self.board.blob) as read:
+            self.board.project(self.key, self.project)
+            initial = read.call_count
+            self.assertGreater(initial, 0)
+            self.board.project_cache.clear()
+            self.board.project(self.key, self.project)
+            self.assertEqual(read.call_count, initial)
+            task = self.project / '.tasks/task-1.md'
+            task.write_text(task.read_text().replace('status: running', 'status: done'))
+            self.git('add', '.'); self.git('commit', '-qm', 'task state changed')
+            self.board.project_cache.clear()
+            result = self.board.project(self.key, self.project)
+            self.assertEqual(result['tasks'][0]['status'], 'done')
+            self.assertEqual(read.call_count, initial + 1)
+            self.assertLessEqual(self.board.content_cache_bytes, 8 * 1024 * 1024)
+
+    def test_malformed_audit_json_cannot_break_or_approve_the_board(self):
+        audits = self.project / '.tasks/audits'; audits.mkdir()
+        (audits / 'bad-1.json').write_text('[]')
+        self.git('add', '.'); self.git('commit', '-qm', 'malformed audit fixture')
+        result = self.board.snapshot()['projects'][0]
+        self.assertIsNone(result['error'])
+        self.assertFalse(result['audits'][0]['current'])
+        self.assertEqual(result['audits'][0]['verdict'], 'invalid')
+
+    def test_restart_reuses_only_a_valid_local_unprivileged_port(self):
+        record = self.home / 'dashboard.json'
+        self.assertEqual(dashboard.preferred_port(self.home, 0), 0)
+        for url in ('http://127.0.0.1:50248/', 'http://127.0.0.1:65535/'):
+            record.write_text(json.dumps({'url': url}))
+            self.assertEqual(dashboard.preferred_port(self.home, 0), int(url.split(':')[2].rstrip('/')))
+            self.assertEqual(dashboard.preferred_port(self.home, 19069), 19069)
+        for url in ('http://evil.example:50248/', 'http://127.0.0.1:80/',
+                    'http://127.0.0.1:65536/', 'http://127.0.0.1:50248/other',
+                    'http://127.0.0.1:50248/?secret=value', 'http://127.0.0.1@evil.example:50248/'):
+            record.write_text(json.dumps({'url': url}))
+            self.assertEqual(dashboard.preferred_port(self.home, 0), 0)
+
+    def test_busy_previous_port_uses_another_loopback_socket(self):
+        record = self.home / 'dashboard.json'; record.write_text(json.dumps({'url': 'http://127.0.0.1:50248/'}))
+        class Server:
+            server_port = 50333
+            def serve_forever(self): pass
+            def server_close(self): pass
+        argv = ['board', '--workspace', str(self.workspace), '--home', str(self.home)]
+        with patch.object(sys, 'argv', argv), patch.object(dashboard.http.server, 'ThreadingHTTPServer', side_effect=[OSError('occupied'), Server()]) as factory:
+            dashboard.main()
+        self.assertEqual(factory.call_args_list[0].args[0], ('127.0.0.1', 50248))
+        self.assertEqual(factory.call_args_list[1].args[0], ('127.0.0.1', 0))
+        self.assertEqual(json.loads(record.read_text())['url'], 'http://127.0.0.1:50333/')
+
     def test_hidden_directory_markers_are_valid_audit_inputs_not_public_outputs(self):
         marker = self.project / 'reports/.gitkeep'
         marker.write_text('')
