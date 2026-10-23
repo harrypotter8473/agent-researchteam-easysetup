@@ -191,12 +191,35 @@ def main():
                         record['checks']['local_http'] = local_html_check(folder)
                         if not record['checks']['local_http']:
                             raise RuntimeError('S3 local HTTP access mismatch')
-                    if not record.get('delivered'):
-                        record['delivery_receipt'] = verify_lead_attachment(folder, output, record['thread'])
-                        record['delivered'] = record['delivery_receipt']['verified']
+                    # Old delivery flags cannot approve changed output bytes.
+                    record['delivery_receipt'] = verify_lead_attachment(folder, output, record['thread'])
+                    record['delivered'] = record['delivery_receipt']['verified']
                     save(path, result)
                     if record.get('delivered'):
+                        record['state'] = 'ready'
+                        rb.observe_validation(folder, record['thread'], [output],
+                            {**record['checks'], 'lead_delivery': True})
+                        save(path, result)
                         break
+                checks = dict(record.get('checks', {}))
+                if evidence['ready_for_delivery']:
+                    checks['lead_delivery'] = bool(record.get('delivered'))
+                rb.observe_validation(folder, record['thread'], [output], checks)
+                recovery = rb.recovery_status(folder, record['thread'])
+                record['recovery'] = recovery
+                record['state'] = recovery.get('state', 'running')
+                save(path, result)
+                if recovery.get('state') in ('paused', 'waiting_for_user'):
+                    group = {t: item for t, item in rb.tasks(folder).items() if item[1].get('thread', '') == record['thread']}
+                    current = rb.validation.completion_status(folder, group, [output],
+                        require_intermediate=True, observed=checks)
+                    # A saved pause is diagnostic history, not authority to stop
+                    # a genuinely resumed author/reviewer or reject changed data.
+                    if (not current['active'] and (current['human_required'] or
+                            recovery.get('progress') == current['progress'])):
+                        missing = ', '.join(g['check'] for g in current['missing'])
+                        raise RuntimeError(name + ': ' + recovery.get('reason', '') + ' / ' + missing +
+                                           ' / saved task board: ' + str(folder / '.tasks'))
                 if time.monotonic() >= deadline:
                     result['state'] = 'pending'
                     raise RuntimeError(name + ' remains incomplete; same saved request will be inspected on retry, not duplicated')

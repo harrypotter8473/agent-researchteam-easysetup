@@ -10,6 +10,7 @@ _SHARED = Path(__file__).resolve().parent
 if str(_SHARED) not in sys.path:
     sys.path.insert(0, str(_SHARED))
 import audit_gate
+import validation_recovery
 
 ROLES = {'research-lead', 'research-scout', 'research-worker', 'research-reviewer'}
 SCENARIOS = {
@@ -45,23 +46,27 @@ def scenario_evidence(root, name, lead_ran, ledger_ok):
         completed = {e['role'] for e in events if e.get('status') == 'done'}
         if lead_ran:
             completed.add('research-lead')
-        approved = audit_gate.delivery_allowed(root, [target])
+        approved = audit_gate.delivery_allowed(root, validation_recovery.output_files([SCENARIOS[name][1]]))
         all_roles = ROLES.issubset(completed)
-        receipts = list(audit_gate.receipts(root))
-        intermediate = any(r['scope'] == 'intermediate' for r in receipts)
+        import research_board
+        intermediate = validation_recovery.completion_status(root, research_board.tasks(root),
+            [SCENARIOS[name][1]], require_intermediate=True)['intermediate_audit']
         checks = {'roles': all_roles, 'ledger': bool(ledger_ok), 'audit': approved,
                   'intermediate_audit': intermediate, 'output': (root / target).is_file()}
         if name == 'S1':
             checks['sources_saved'] = any(p.is_file() and p.name != '.gitkeep' and p.stat().st_size >= 200 for p in (root / 'sources').rglob('*'))
         if name == 'S2':
-            checks['numeric_recalculation'] = verify_numbers(root)
+            try:
+                checks['numeric_recalculation'] = verify_numbers(root)
+            except (OSError, ValueError, KeyError, TypeError, statistics.StatisticsError):
+                checks['numeric_recalculation'] = False
         if name == 'S3':
             html = (root / target).read_text(encoding='utf-8')
             checks['html'] = '<html' in html.lower() and 'verified-reference' in html
         return {'ready_for_delivery': all(checks.values()), 'checks': checks,
                 'roles': sorted(completed), 'artifact_sha256': audit_gate.digest(root / target) if (root / target).is_file() else ''}
     except (OSError, ValueError, KeyError, TypeError):
-        return {'ready_for_delivery': False, 'checks': {}, 'roles': []}
+        return {'ready_for_delivery': False, 'checks': {'evidence_readable': False}, 'roles': []}
 
 
 REQUIRED_CHECKS = {'roles', 'ledger', 'audit', 'intermediate_audit', 'output'}

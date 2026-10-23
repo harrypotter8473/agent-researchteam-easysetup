@@ -43,7 +43,7 @@ jobs:
           Copy-Item docs/release-notes.ko.md $notes
           $files = @($built.Packages | ForEach-Object Path) + @($built.Checksums)
           $releaseOptions = @('--latest')
-          if ($version -cin @('0.18.0','0.19.0','0.20.0','0.21.0','0.21.1')) { $releaseOptions = @('--prerelease', '--latest=false') }
+          if ($version -cin @('0.18.0','0.19.0','0.20.0','0.21.0','0.21.1','0.21.2')) { $releaseOptions = @('--prerelease', '--latest=false') }
           gh release create $tag @files --target $env:GITHUB_SHA --title ('NST Research Team Setup ' + $version) --notes-file $notes @releaseOptions
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
   windows-powershell5:

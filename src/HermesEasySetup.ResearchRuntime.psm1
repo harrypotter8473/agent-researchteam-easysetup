@@ -575,7 +575,7 @@ function Invoke-HermesResearchTeamSetup {
         Start-HermesResearchGatewayTask -Plan $leadPlan
         Wait-HermesResearchGatewayReady -CommandPath $command -ProfileName 'research-lead' -Environment $environment -Plan $leadPlan -TimeoutSeconds 90
 
-        Publish-HermesResearchStage $ProgressCallback 'research-live-test' '설치된 총괄·독립 실행기로 실제 S1·S2·S3을 수행합니다. 원문 조사·분석·감사·첨부 검증이 끝나야 사용 준비 완료입니다. 진행 중에는 기록을 보존합니다.' 80
+        Publish-HermesResearchStage $ProgressCallback 'research-live-test' '설치된 총괄·독립 실행기로 실제 S1·S2·S3을 수행합니다. 필수 검증이 누락·무효화되면 총괄이 수정·독립 재감사를 배정합니다. 실제 통과·첨부 검증 전에는 완료로 표시하지 않으며, 사용자 입력이 필요하면 구체적인 요청을 표시합니다. 기록과 한도는 보존합니다.' 80
         $testEnv = @{} + $environment
         $testEnv['MATTERMOST_URL'] = $summary.ServerURL; $testEnv['MATTERMOST_TOKEN'] = $tokens['research-lead']
         $workflowTest = Invoke-HermesResearchSelfTest -ResearchRoot $root -Python $python -Environment $testEnv -WorkspacePath $options.WorkspacePath -ChannelID $summary.HomeChannelID -CommandPath $command -Mention $mention

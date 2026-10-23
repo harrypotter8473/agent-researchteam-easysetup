@@ -105,6 +105,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 import audit_gate
 import research_activity as activity
+import validation_recovery as validation
 
 TASKS = ".tasks"
 LEDGER = f"{TASKS}/ledger.jsonl"
@@ -623,6 +624,20 @@ class Notifier:
             return False, "no Mattermost channel or bot token for this paper"
         digest = hashlib.sha256(data).hexdigest()
         try:
+            # A recovered lead turn may repeat deliver after the original post
+            # succeeded but its local acknowledgement was interrupted. Observe
+            # that post first; a failed GET is not permission to upload again.
+            author = mm_api(self.creds, 'GET', '/users/me')['id']
+            posts = mm_api(self.creds, 'GET', '/posts/' + thread + '/thread').get('posts', {})
+            for post in posts.values():
+                if (post.get('user_id') != author or post.get('channel_id') != self.channel or post.get('delete_at') or
+                        not (post.get('id') == thread or post.get('root_id') == thread)):
+                    continue
+                for existing in post.get('file_ids', []):
+                    info = mm_api(self.creds, 'GET', '/files/' + existing + '/info')
+                    if (info.get('name') == name and info.get('size') == len(data) and
+                            hashlib.sha256(mm_download(self.creds, existing)).hexdigest() == digest):
+                        return True, digest
             fid = mm_upload(self.creds, self.channel, name, data, mime)
             if hashlib.sha256(mm_download(self.creds, fid)).hexdigest() != digest:
                 return False, "the downloaded copy does not match (SHA-256)"
@@ -1021,6 +1036,7 @@ def cmd_new(a):
             "updated": now()}
     save(p, meta, body.strip() + "\n")
     publish(repo, [p.relative_to(repo)], f"board: new task {a.id} -> {a.assignee}")
+    register_validation_request(repo, meta.get('thread', ''), a.id)
     activity.Journal(TEAM_HOME, activity_project(repo), a.id, 'research-lead').emit(
         '작업 배정', activity.LABELS[a.assignee] + ' 담당 · 결과: ' + a.expects, 'done')
     print(f"{a.id}: created for {a.assignee}" + (f", after {a.after}" if a.after else ""))
@@ -1090,6 +1106,7 @@ def cmd_edit(a):
     meta["updated"] = now()
     save(p, meta, body)
     publish(repo, [p.relative_to(repo)], f"board: edit {a.id}")
+    register_validation_request(repo, meta.get('thread', ''), a.id + ':' + meta['updated'])
     note = Notifier(repo, 'research-lead')
     note.journal(a.id).emit('계획·작업 변경', '상태 ' + meta.get('status', '') + ' · ' + (a.append or '')[:180],
                            'waiting' if meta.get('gate') == 'human' else 'info')
@@ -1123,8 +1140,15 @@ def cmd_deliver(a):
     """The lead's delivery of a finished file (e.g. an audited report) to a thread."""
     repo = Path(a.paper)
     sync(repo)
+    group = {tid: t for tid, t in tasks(repo).items() if t[1].get('thread', '') == a.thread}
+    gates = validation.completion_status(repo, group, a.items, require_intermediate=True)
     if not audit_gate.delivery_allowed(repo, delivery_inputs(a.items)):
-        die("FinalAuditRequired: final audit must pass for exactly the current file and evidence versions")
+        observe_validation(repo, a.thread, a.items, {g['check']: False for g in gates['missing']})
+        die("FinalAuditRequired: final audit must pass for exactly the current file and evidence versions; " +
+            json.dumps(gates['missing'], ensure_ascii=False))
+    if gates['missing']:
+        observe_validation(repo, a.thread, a.items, {g['check']: False for g in gates['missing']})
+        die('RequiredValidationMissing: ' + json.dumps(gates['missing'], ensure_ascii=False))
     if git(repo, "status", "--porcelain", "--", *delivery_inputs(a.items)).stdout.strip():
         die("deliver only what is committed and pushed — the file has local changes")
     base = git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -1499,7 +1523,9 @@ def execute(a, clone, p, me):
 
     if status == "done":
         delivery_items = csv(meta.get("deliver"))
-        can_deliver = audit_gate.delivery_allowed(clone, delivery_inputs(delivery_items))
+        request_board = {t: item for t, item in tasks(clone).items() if item[1].get('thread', '') == thread}
+        can_deliver = bool(delivery_items) and not validation.completion_status(
+            clone, request_board, delivery_items, require_intermediate=True)['missing']
         if delivery_items and not can_deliver:
             note.post("FinalAuditRequired: output is saved; lead must obtain final approval before delivery.", thread)
         for name, data, mime, label in (deliveries(meta, clone, base) if can_deliver else []):
@@ -1727,6 +1753,12 @@ def cmd_coordinate(a):
         errors = json.loads(rd(error_path)) if error_path.is_file() else {}
         if getattr(a, 'retry_paused', False):
             errors = {k: v for k, v in errors.items() if not v.get('paused')}
+            for k, projects in state.items():
+                if k.startswith('validation:') and isinstance(projects, dict):
+                    for request in projects.values():
+                        if request.get('state') == 'paused':
+                            request.update(state='resume_requested', no_progress=0)
+            write_state(state_path, state)
             write_state(error_path, errors)
     except ValueError:
         die(f"{state_path} is unreadable; restore it rather than replaying events blindly")
@@ -1774,6 +1806,11 @@ def cmd_coordinate(a):
                     write_state(state_path, state)
                     sync(clone)
                     lines = ledger_lines(clone)
+                # A completed ledger is not necessarily a validated deliverable.
+                # This watchdog also runs when ALL cards are done: no new result
+                # event can otherwise wake the lead after a stale/rejected audit.
+                if state[key] == len(lines):
+                    recover_required_validation(a, clone, state, key, state_path, errors, error_path)
                 diagnostic = blocked_plan_event(clone)
                 if diagnostic:
                     fingerprint = hashlib.sha256(json.dumps(diagnostic, sort_keys=True).encode()).hexdigest()
@@ -1819,9 +1856,184 @@ def blocked_plan_event(clone):
 
 
 def write_state(path, state):
-    tmp = path.with_name(path.name + ".tmp")
+    # Observers and independent board commands can write at the same time.
+    tmp = path.with_name('.state-' + uuid.uuid4().hex[:16] + ".tmp")
     wr(tmp, json.dumps(state, ensure_ascii=False, sort_keys=True) + "\n")
     os.replace(tmp, path)
+
+
+def validation_remote_key(repo):
+    remote = git(repo, 'remote', 'get-url', 'origin').stdout.strip()
+    if not remote:
+        raise ValueError('Validation request requires a registered board remote')
+    return hashlib.sha256(remote.encode()).hexdigest()
+
+
+def validation_request_path(repo, thread, kind):
+    """Private signal, not an approval. Short names also support Windows paths."""
+    key = validation_remote_key(repo)[:32]
+    request = hashlib.sha256(thread.encode()).hexdigest()[:32]
+    return TEAM_HOME / 'run' / 'validation-requests' / key / (request + '.' + kind + '.json')
+
+
+def register_validation_request(repo, thread, generation):
+    path = validation_request_path(repo, thread, 'intent')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_state(path, {'schema': 1, 'thread': thread, 'generation': generation})
+
+
+def observe_validation(repo, thread, outputs, checks):
+    """Publish negative checks for the coordinator; positives NEVER open gates.
+
+    Observations apply only to this committed tree and request. After a repair,
+    stale numeric/role observations are ignored until the real validator rechecks.
+    """
+    path = validation_request_path(repo, thread, 'observation')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_state(path, {'schema': 1, 'thread': thread, 'outputs': list(outputs),
+                       'require_intermediate': True,
+                       'checks': {k: v for k, v in checks.items() if type(v) is bool},
+                       'source_tree': git(repo, 'rev-parse', 'HEAD^{tree}').stdout.strip()})
+
+
+def required_validation_requests(clone):
+    """Only current tracked requests, not every historical report in the repo."""
+    seed_pending_validation(clone)
+    directory = validation_request_path(clone, '', 'intent').parent
+    requests = {}
+    for kind in ('intent', 'observation'):
+        for path in sorted(directory.glob('*.' + kind + '.json')):
+            if path.is_symlink() or path.stat().st_size > 1024 * 1024:
+                raise ValueError('Unsafe validation recovery signal')
+            data = json.loads(rd(path))
+            if data.get('schema') != 1 or not isinstance(data.get('thread'), str):
+                raise ValueError('Invalid validation recovery signal')
+            if (not isinstance(data.get('outputs', []), list) or
+                    not all(isinstance(v, str) for v in data.get('outputs', [])) or
+                    not isinstance(data.get('checks', {}), dict) or
+                    not all(isinstance(k, str) and type(v) is bool for k, v in data.get('checks', {}).items())):
+                raise ValueError('Invalid validation recovery checks')
+            request = requests.setdefault(data['thread'], {'thread': data['thread']})
+            if kind == 'intent':
+                request['generation'] = data.get('generation', '')
+            elif data.get('source_tree') == git(clone, 'rev-parse', 'HEAD^{tree}').stdout.strip():
+                request.update(outputs=data.get('outputs', []), checks=data.get('checks', {}), require_intermediate=True)
+    return requests
+
+
+def seed_pending_validation(clone):
+    """Resume only a saved incomplete installed test, never an old passed suite."""
+    path = TEAM_HOME / 'live-test.json'
+    if not path.is_file():
+        return
+    value = json.loads(rd(path))
+    if value.get('passed') or value.get('state') == 'ready' or not value.get('folder'):
+        return
+    tree = git(clone, 'rev-parse', 'HEAD^{tree}').stdout.strip()
+    remote = git(clone, 'remote', 'get-url', 'origin').stdout.strip()
+    root = Path(value['folder'])
+    if not root.is_dir():
+        return
+    for project in root.iterdir():
+        if not project.is_dir() or not (project / '.git').is_dir():
+            continue
+        origin = git(project, 'remote', 'get-url', 'origin', check=False)
+        if origin.returncode or origin.stdout.strip() != remote:
+            continue
+        marker = project / TASKS / 'project.json'
+        if not marker.is_file():
+            continue
+        name = json.loads(rd(marker)).get('validation')
+        record = value.get('scenarios', {}).get(name, {})
+        thread = record.get('thread')
+        if not thread or (record.get('ready_for_delivery') and record.get('delivered')):
+            continue
+        signal = validation_request_path(clone, thread, 'observation')
+        if signal.exists():
+            continue
+        outputs = [x for _, m, _ in tasks(clone).values() if m.get('thread', '') == thread for x in csv(m.get('deliver'))]
+        signal.parent.mkdir(parents=True, exist_ok=True)
+        # Recompute actual gates in this clone; the older saved booleans are not
+        # granted authority or assumed to describe this new tree.
+        write_state(signal, {'schema': 1, 'thread': thread, 'outputs': outputs,
+                             'checks': {}, 'source_tree': tree})
+
+
+def recovery_status(repo, thread):
+    path = TEAM_HOME / 'run' / 'lead-coordinator.json'
+    if not path.is_file():
+        return {}
+    key = 'validation:' + validation_remote_key(repo)
+    value = json.loads(rd(path)).get(key, {}).get(thread, {})
+    return value if isinstance(value, dict) else {}
+
+
+def recover_required_validation(a, clone, state, key, state_path, errors, error_path):
+    """Wake the actual lead on unmet completion gates, with bounded durable retry."""
+    watch = state.setdefault('validation:' + key, {})
+    for thread, request in required_validation_requests(clone).items():
+        previous = watch.get(thread, {})
+        # A new unrelated report must not revive an already delivered old request
+        # merely because the shared repo acquired new evidence after its delivery.
+        if (previous.get('state') == 'verified' and
+                previous.get('generation') == request.get('generation') and
+                not any(v is False for v in request.get('checks', {}).values())):
+            continue
+        event, status = validation.recovery_event(clone, tasks(clone), request)
+        if status is None:
+            continue
+        action, current = validation.recovery_step(previous, status, time.time(),
+                                                   max_attempts=MAX_ATTEMPTS,
+                                                   interval=max(60, 2 * a.interval))
+        current['generation'] = request.get('generation')
+        watch[thread] = current
+        write_state(state_path, state)
+        task = event['task'] if event else 'validation'
+        if action == 'pause':
+            Notifier(clone, 'research-lead').post(
+                '필수 검증 복구 보류 · ' + current['reason'] + '\n누락: ' +
+                ', '.join(g['check'] for g in status['missing']) +
+                '\n작업 보드에서 누락 검사·반려 근거·수정 파일을 확인하세요. 기록과 한도는 유지했습니다.', thread, ping=True)
+        if action != 'invoke' or not event:
+            continue
+        error_key = hashlib.sha256((str(clone) + json.dumps(event, sort_keys=True)).encode()).hexdigest()
+        saved_error = errors.get(error_key, {})
+        if saved_error.get('paused'):
+            current.update(state='paused', reason=activity.clean(saved_error.get('reason', '총괄 연결 오류')))
+            write_state(state_path, state)
+            continue
+        if time.time() < saved_error.get('next_try', 0):
+            current.update(state='retry_wait', reason='기존 연결 오류의 재시도 대기시간을 유지합니다.')
+            write_state(state_path, state)
+            continue
+        journal = activity.Journal(TEAM_HOME, activity_project(clone), task, 'research-lead')
+        journal.emit('필수 검증 복구', current['reason'], 'running',
+                     detail=json.dumps(status['missing'], ensure_ascii=False)[:4000])
+        # Persist intent BEFORE invocation: a process restart cannot reset counts.
+        current = validation.invoked(current, time.time(), interval=max(60, 2 * a.interval))
+        watch[thread] = current
+        write_state(state_path, state)
+        try:
+            handled = coordinate_with_retry(a, clone, event, errors, error_path)
+        except LeadTurnPartial as exc:
+            current.update(state='paused', reason='총괄 실행 한도에 도달했습니다. 저장된 부분 작업과 누락 검사를 확인하세요.')
+            journal.emit('필수 검증 복구', current['reason'], 'waiting')
+            write_state(state_path, state)
+            continue
+        if not handled:
+            error_key = hashlib.sha256((str(clone) + json.dumps(event, sort_keys=True)).encode()).hexdigest()
+            if errors.get(error_key, {}).get('paused'):
+                current.update(state='paused', reason=activity.clean(errors[error_key].get('reason', '총괄 연결 오류')))
+        else:
+            sync(clone)
+            _, after = validation.recovery_event(clone, tasks(clone), request)
+            if after:
+                if after['active']:
+                    current.update(state='waiting_for_workers', reason='총괄이 수정·독립 재감사를 배정했습니다.')
+                elif after['human_required']:
+                    current.update(state='waiting_for_user', reason='작업 보드의 구체적인 사용자 입력·승인 요청을 확인하세요.')
+        journal.emit('필수 검증 복구', current['reason'], 'waiting')
+        write_state(state_path, state)
 
 
 def record_runner_error(clone, p, me, error):

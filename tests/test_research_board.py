@@ -10,6 +10,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess as sp
 import sys
@@ -86,7 +87,7 @@ print("STATUS: blocked — cannot" if "BLOCK" in prompt else "STATUS: done")
 
 
 class MockMattermost(http.server.BaseHTTPRequestHandler):
-    posts, files = [], {}
+    posts, files, names = [], {}, {}
 
     def log_message(self, *a):
         pass
@@ -100,16 +101,25 @@ class MockMattermost(http.server.BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         if self.path == "/api/v4/posts":
             post = json.loads(body); post["id"] = f"p{len(self.posts):025d}"
+            post['user_id'] = 'offline-lead'
             MockMattermost.posts.append(post); return self._json(post)
         if self.path == "/api/v4/files":
             boundary = self.headers["Content-Type"].split("boundary=")[1].encode()
             part = [p for p in body.split(b"--" + boundary) if b'name="files"' in p][0]
             data = part.split(b"\r\n\r\n", 1)[1].rsplit(b"\r\n", 1)[0]
             fid = f"f{len(self.files):025d}"; MockMattermost.files[fid] = data
+            MockMattermost.names[fid] = re.search(rb'filename="([^"]+)"', part).group(1).decode('utf-8')
             return self._json({"file_infos": [{"id": fid, "size": len(data)}]})
         self._json({}, 404)
 
     def do_GET(self):
+        if self.path == '/api/v4/users/me': return self._json({'id': 'offline-lead'})
+        if self.path.startswith('/api/v4/posts/') and self.path.endswith('/thread'):
+            root = self.path.split('/')[-2]
+            return self._json({'posts': {p['id']: p for p in self.posts if p.get('root_id') == root or p['id'] == root}})
+        if self.path.startswith('/api/v4/files/') and self.path.endswith('/info'):
+            fid = self.path.split('/')[-2]
+            if fid in self.files: return self._json({'name': self.names[fid], 'size': len(self.files[fid])})
         fid = self.path.rsplit("/", 1)[-1]
         if fid in self.files:
             data = self.files[fid]
@@ -142,7 +152,7 @@ class Base(unittest.TestCase):
         cls.server.shutdown()
 
     def setUp(self):
-        MockMattermost.posts.clear(); MockMattermost.files.clear()
+        MockMattermost.posts.clear(); MockMattermost.files.clear(); MockMattermost.names.clear()
         self.tmp = Path(tempfile.mkdtemp(prefix="board-test-"))
         self.home = self.tmp / "team"; self.hh = self.tmp / "hermes"
         self.ws = self.tmp / "ws"; self.ws.mkdir(); (self.tmp / "empty.gitconfig").write_text("")
@@ -190,9 +200,9 @@ class Base(unittest.TestCase):
                       "experiments/x1/protocol.md" if "PROTOCOL" in body or body == "CAPPED" else "paper/main.tex")
         self.board("new", str(self.paper), "--id", tid, "--assignee", assignee, "--body", body, *extra)
 
-    def audit(self, producer, scope="final", tid="r1"):
+    def audit(self, producer, scope="final", tid="r1", thread=""):
         self.task(tid, "research-reviewer", "independent audit", "--expects", f"reviews/{tid}/verdict.json",
-                  "--after", producer, "--audit-of", producer, "--audit-scope", scope)
+                  "--after", producer, "--audit-of", producer, "--audit-scope", scope, "--thread", thread)
         self.run_role("research-reviewer")
         git("pull", "-q", cwd=self.paper)
 
@@ -495,11 +505,12 @@ class BoardTests(Base):
         self.assertEqual([], list((self.home / "run" / "prompts").glob("*")))
 
     def test_report_delivered_as_verified_docx(self):
-        self.task("l1", "research-scout", "REPORT", "--expects", "notes/report.md", "--deliver", "notes/report.md:docx")
+        self.task("l1", "research-scout", "REPORT", "--expects", "notes/report.md", "--deliver", "notes/report.md:docx", "--thread", "p" * 26)
         self.run_role("research-scout")
         self.assertIn("status: done", self.state("l1"))
         self.assertEqual(0, len(MockMattermost.files))  # completion is NOT final audit approval
-        self.audit("l1")
+        self.audit("l1", scope='intermediate', tid='mid', thread='p' * 26)
+        self.audit("l1", thread='p' * 26)
         self.board("deliver", str(self.paper), "notes/report.md:docx", "--thread", "p" * 26)
         self.assertEqual(1, len(MockMattermost.files))
         data = next(iter(MockMattermost.files.values()))
@@ -510,9 +521,10 @@ class BoardTests(Base):
         self.assertTrue(posted and "verified" in posted[0]["message"])
 
     def test_lead_delivers_committed_report_and_refuses_local_edits(self):
-        self.task("l1", "research-scout", "REPORT", "--expects", "notes/report.md")
+        self.task("l1", "research-scout", "REPORT", "--expects", "notes/report.md", "--thread", "p" * 26)
         self.run_role("research-scout")
-        self.audit("l1")
+        self.audit("l1", scope='intermediate', tid='mid', thread='p' * 26)
+        self.audit("l1", thread='p' * 26)
         r = self.board("deliver", str(self.paper), "notes/report.md:docx", "notes/report.md", "--thread", "p" * 26)
         self.assertIn("delivered and verified", r.stdout)
         self.assertEqual(2, len(MockMattermost.files))
