@@ -1,4 +1,4 @@
-# NST Research Team Setup 0.22.0
+# NST Research Team Setup 0.22.1
 
 Windows PC에 Mattermost·Hermes·총괄/조사/분석/감사 3+1 연구팀을 구성하는 NST 전용 마법사입니다.
 한국어 작업보드와 NST 브랜딩을 Mattermost 안에 연결합니다.
@@ -12,8 +12,8 @@ Windows PC에 Mattermost·Hermes·총괄/조사/분석/감사 3+1 연구팀을 �
 Mattermost에는 중요한 보고와 결과만 남기고, 왼쪽 **연구 작업보드**에서 프로젝트·작업·문서·감사·확인 요청·실시간 행동 기록을 봅니다.
 사용자는 원하는 결과물만 요청합니다. 역할 배정과 후속 판단은 총괄이, 권한·버전별 감사·전달 검사는 프로그램이 담당합니다.
 
-프로젝트는 사람이 읽기 쉬운 이름으로 표시합니다. 작업 카드는 **진행 중 / 확인 필요 / 작업 완료**로 묶고
-짧은 이름·역할·상태만 표시합니다. 클릭하면 줄이 잘리지 않는 저장 요약과 상세 결과를 확인합니다.
+프로젝트는 사람이 읽기 쉬운 이름으로 표시합니다. 작은 네모 작업 카드는 **대기 / 진행 중 / 확인 필요 / 완료** 칸 사이를 상태에 따라 이동합니다.
+카드 앞면에는 **분석 보고서**처럼 짧은 제목만 표시합니다. 클릭하면 요약·담당·현재 상태·감사·결과 파일과 상세 기록을 확인합니다.
 실제 총괄 조치도 카드로 보이고 실무 과제·감사 승인과 구분됩니다. 활동은 담당별 연속 묶음과 이전 기록 조회,
 문서는 화면 아래의 검색 가능한 폴더형 목록으로 정리합니다. 요약·화면 표시를 위한 추가 모델 호출은 없습니다.
 
@@ -40,13 +40,14 @@ Mattermost에는 중요한 보고와 결과만 남기고, 왼쪽 **연구 작업
 현재는 **프리릴리스**입니다. 무료 회귀와 실제 모델·새 PC 설치 검증은 다릅니다.
 0.21.2는 별도 프로필·기존 Mattermost의 새 검증 채널에서 실제 S1→S2→S3와 중간/최종 감사·총괄 첨부 해시 검증을 통과했습니다.
 0.22.0도 새 ZIP 추출본으로 격리 실제 S1·중간/최종 감사·총괄 Word 첨부 해시 검증을 통과했습니다.
-이번 S1-only 결과는 전체 S1/S2/S3 재인증이 아닙니다. [검증 범위](docs/verification-0.22.0.md)를 확인하세요.
+0.22.1은 카드 표시만 수정한 로컬 후보이며 UI 상태 이동·클릭 상세·기존 S1 기록 표시·추출 마법사를 별도로 검증합니다.
+0.22.1의 Mattermost 내부 보드도 같은 UI를 포함합니다. 보드 플러그인만 갱신할 수 있으며 실모델 S1/S2/S3를 새로 실행한 것은 아닙니다. [현재 검증 범위](docs/verification-0.22.1.md)를 확인하세요.
 새 Windows PC 전체 설치나 Word 모든 페이지의 시각적 배치까지 인증한 결과는 아닙니다.
 
 - PowerShell: `tests/Run-NstRegression.ps1 -IncludeDistribution` (Windows PowerShell 5.1 및 PowerShell 7).
 - Python: `python -B team/build_manifest.py --check`, `python -B -m unittest discover -s tests -p 'test_*.py' -v`.
 - 보드·플러그인: `node tests/test_board_ui.cjs`, `node tests/test_mattermost_plugin_webapp.cjs`, Go server tests.
-- 배포: `Build-Distributions.ps1 -DestinationRoot <소스 밖 별도 폴더>` → `NST-Research-Team-Setup-0.22.0.zip`과 SHA256SUMS.txt.
+- 배포: `Build-Distributions.ps1 -DestinationRoot <소스 밖 별도 폴더>` → `NST-Research-Team-Setup-0.22.1.zip`과 SHA256SUMS.txt.
 
 [설치 안내](docs/research-guide.ko.md) · [연구팀 구조](docs/research-team.md) · [작업보드](docs/research-board.ko.md) ·
-[플러그인](docs/mattermost-plugins.ko.md) · [복구](docs/recovery-guide.ko.md) · [검증 범위](docs/verification-0.22.0.md)
+[플러그인](docs/mattermost-plugins.ko.md) · [복구](docs/recovery-guide.ko.md) · [검증 범위](docs/verification-0.22.1.md)

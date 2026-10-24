@@ -10,8 +10,17 @@ let requested = route.get('project'), data = {projects:[]}, selected = null, eve
 let eventScope = '', nextCursor = null, moreEvents = false, olderBusy = false;
 let activityLoadedScope = '';
 const openedGroups = new Set(), openedFolders = new Set();
+let cardScope = null;
+const taskCards = new Map();
 function el(tag,text,className){const x=document.createElement(tag);if(text!==undefined)x.textContent=text;if(className)x.className=className;return x;}
 function current(){return data.projects.find(p=>p.id===selected);}
+function scenarioCode(p){return p.test?p.name?.match(/[-_](s[123])$/i)?.[1].toUpperCase():null;}
+function projectTitle(p){
+  if(p.display_name)return p.display_name;
+  const title={S1:'문헌검토 보고서',S2:'자료 분석 보고서',S3:'내부 웹 보고서'}[scenarioCode(p)];
+  return title||(p.name==='reports'?'연구 보고서':p.name);
+}
+function projectLabel(p){return p.project_label||(p.test?'설치 검증'+(scenarioCode(p)?' '+scenarioCode(p):''):'연구 프로젝트');}
 function summary(task){
   const text=task.summary||(task.status==='done'?'저장된 결과를 확인하세요.':'작업이 진행되면 결과를 표시합니다.');
   if(task.kind!=='coordination')return text;
@@ -20,7 +29,7 @@ function summary(task){
   return useful.slice(0,2).join(' · ')||text;
 }
 function taskTitle(task){
-  const title=task.title || ({'research-scout':'자료 조사','research-worker':'분석·보고서','research-reviewer':'감사','research-lead':'조치'}[task.assignee] || '작업');
+  const title=(task.title || ({'research-scout':'자료 조사','research-worker':'분석 보고서','research-reviewer':'감사','research-lead':'조치'}[task.assignee] || '작업')).replace(/^분석·보고서$/, '분석 보고서');
   if(task.kind==='coordination')return title.startsWith('총괄')?title:'총괄 '+title;
   if(task.assignee==='research-reviewer')return task.audit_scope==='final'||title==='최종 검토'?'최종 감사':'중간 감사';
   return title;
@@ -34,7 +43,9 @@ function taskBucket(p,t){
   if(t.approval)return 'attention';
   if(followedUp(p,t))return 'done';
   if(['failed','blocked','partial'].includes(t.status)||(t.status==='done'&&t.assignee==='research-reviewer'&&(t.verdict!=='pass'||!String(t.audit).includes('현재 버전'))))return 'attention';
-  return t.status==='done'?'done':'active';
+  if(t.status==='ready')return 'waiting';
+  if(t.status==='running')return 'active';
+  return t.status==='done'?'done':'attention';
 }
 function taskBadge(p,t){
   if(t.approval)return '내 확인 필요';
@@ -66,19 +77,25 @@ function detail(project,task){
   $('preview').hidden=true;$('detail').showModal();
 }
 function renderTasks(p){
+  const scope=p.id||p.name||'';
+  if(cardScope!==scope){taskCards.clear();cardScope=scope;}
+  const ids=new Set(p.tasks.map(t=>t.id));
+  for(const id of taskCards.keys())if(!ids.has(id))taskCards.delete(id);
   const items=p.tasks.filter(t=>!$('task-role').value||t.assignee===$('task-role').value).slice().sort((a,b)=>{
     const priority=t=>t.status==='running'?0:t.status==='ready'?1:2;
     return priority(a)-priority(b)||(b.updated||'').localeCompare(a.updated||'');
   });
-  $('tasks').replaceChildren(...[['active','진행 중'],['attention','확인 필요'],['done','작업 완료']].map(([key,label])=>{
+  $('tasks').replaceChildren(...[['waiting','대기'],['active','진행 중'],['attention','확인 필요'],['done','완료']].map(([key,label])=>{
     const lane=el('section',undefined,'task-lane '+key);lane.dataset.bucket=key;
     const rows=items.filter(t=>taskBucket(p,t)===key),head=el('div',undefined,'lane-heading');
     head.append(el('h4',label),el('span',String(rows.length),'lane-count'));lane.append(head);
     const cards=el('div',undefined,'lane-cards');cards.append(...rows.map(t=>{
-    const card=el('button',undefined,'card');card.dataset.kind=t.kind||'task';card.dataset.task=t.id;
+    let card=taskCards.get(t.id);
+    if(!card){card=el('button',undefined,'card');taskCards.set(t.id,card);}
+    card.dataset.kind=t.kind||'task';card.dataset.task=t.id;
     card.setAttribute('aria-label',taskTitle(t)+' · '+taskBadge(p,t)+' · 상세 보기');
-    card.append(el('span',roles[t.assignee]||'작업','role-tag '+t.assignee));
-    const text=el('div',undefined,'card-title');text.append(el('strong',taskTitle(t)),el('span',taskBadge(p,t),'task-state'));card.append(text);
+    // The same task card moves between lanes; all metadata stays in its detail.
+    card.replaceChildren(el('strong',taskTitle(t),'card-title'));
     card.onclick=()=>detail(p,t);return card;
     }));if(!rows.length)cards.append(el('p','해당 작업 없음','lane-empty'));lane.append(cards);return lane;
   }));
@@ -100,10 +117,10 @@ function render(){
   const visible=data.projects.filter(p=>Boolean(p.test)===(view==='checks'));
   if(requested)selected=visible.find(p=>p.name===requested)?.id||null;else if(!visible.some(p=>p.id===selected))selected=visible[0]?.id||null;
   $('research-view').setAttribute('aria-pressed',String(view==='research'));$('checks-view').setAttribute('aria-pressed',String(view==='checks'));
-  $('projects').replaceChildren(...visible.map(p=>{const b=el('button',p.display_name||p.name);b.setAttribute('aria-current',String(p.id===selected));b.append(el('small',`${p.project_label||(p.test?'설치 검증':'연구 프로젝트')} · ${p.tasks.filter(t=>t.kind!=='coordination').length}개 과제`));b.onclick=()=>{selected=p.id;requested=null;history.replaceState(null,'','?'+new URLSearchParams({view,project:p.name}));render();poll(true);};return b;}));
-  $('workspace').textContent=data.workspace||'';const p=current();$('name').textContent=p?.display_name||p?.name||(view==='checks'?'설치 검증 기록이 없습니다':'연구 프로젝트가 없습니다');$('project-label').textContent=p?.project_label||(view==='checks'?'설치 검증':'연구 프로젝트');$('source').textContent=p?`${p.name} · ${p.path||''} · ${(p.commit||'').slice(0,12)} · ${p.source||''}`:'';$('error').textContent=p?.error||'';
+  $('projects').replaceChildren(...visible.map(p=>{const b=el('button',projectTitle(p));b.setAttribute('aria-current',String(p.id===selected));b.append(el('small',`${projectLabel(p)} · ${p.tasks.filter(t=>t.kind!=='coordination').length}개 과제`));b.onclick=()=>{selected=p.id;requested=null;history.replaceState(null,'','?'+new URLSearchParams({view,project:p.name}));render();poll(true);};return b;}));
+  $('workspace').textContent=data.workspace||'';const p=current();$('name').textContent=p?projectTitle(p):(view==='checks'?'설치 검증 기록이 없습니다':'연구 프로젝트가 없습니다');$('project-label').textContent=p?projectLabel(p):(view==='checks'?'설치 검증':'연구 프로젝트');$('source').textContent=p?`${p.name} · ${p.path||''} · ${(p.commit||'').slice(0,12)} · ${p.source||''}`:'';$('error').textContent=p?.error||'';
   for(const id of ['tasks','approvals','outputs','metrics'])$(id).replaceChildren();$('approval-panel').hidden=true;
-  if(!p){events=[];renderEvents();return;}
+  if(!p){taskCards.clear();cardScope=null;events=[];renderEvents();return;}
   const work=p.tasks.filter(t=>t.kind!=='coordination'),lead=p.tasks.filter(t=>t.kind==='coordination');
   for(const [label,count] of [['실무 과제',work.length],['총괄 조치',lead.length],['진행 중',p.tasks.filter(t=>t.status==='running').length],['내 확인',p.tasks.filter(t=>t.approval).length]])$('metrics').append(el('span',`${label} ${count}`,'metric'));
   renderTasks(p);renderDocuments(p);

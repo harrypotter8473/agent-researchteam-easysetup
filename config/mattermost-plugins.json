@@ -3,9 +3,9 @@
   "packages": [
     {
       "id": "com.hermes.research-board",
-      "version": "0.2.1",
-      "file": "com.hermes.research-board-0.2.1.tar.gz",
-      "sha256": "0fbc6aab05d805bb4ca57b6f3916011b81d2810746e666e8bcb9f649899a56f5"
+      "version": "0.2.5",
+      "file": "com.hermes.research-board-0.2.5.tar.gz",
+      "sha256": "51873233bc32da2181ab422a2290f2f60f5b50050738ccf3e41ec3b11ff203dd"
     },
     {
       "id": "com.nst.wordmark",

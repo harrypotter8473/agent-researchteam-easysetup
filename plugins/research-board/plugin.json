@@ -2,7 +2,7 @@
   "id": "com.hermes.research-board",
   "name": "한국어 연구 작업보드",
   "description": "3+1 연구팀의 프로젝트·작업·결과·감사·사용자 확인 요청을 Mattermost 안에서 읽기 전용으로 확인합니다.",
-  "version": "0.2.1",
+  "version": "0.2.5",
   "min_server_version": "11.0.0",
   "server": {"executables": {"linux-amd64": "server/dist/plugin-linux-amd64"}},
   "webapp": {"bundle_path": "webapp/dist/main.js"},

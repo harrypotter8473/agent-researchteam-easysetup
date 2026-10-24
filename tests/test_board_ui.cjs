@@ -30,11 +30,20 @@ const settle=async()=>{for(let n=0;n<5;n++)await new Promise(resolve=>setImmedia
 const cards=()=>node('tasks').children.flatMap(lane=>lane.children[1].children).filter(c=>c.dataset.task);
 (async()=>{
   await settle();
-  assert.equal(node('tasks').children.length,3);
-  assert.deepEqual(node('tasks').children.map(c=>c.dataset.bucket),['active','attention','done']);
+  assert.equal(node('tasks').children.length,4);
+  assert.deepEqual(node('tasks').children.map(c=>c.dataset.bucket),['waiting','active','attention','done']);
   assert.equal(cards().length,2);
   assert.equal(node('name').textContent,'논문 비교 보고서');
   assert.equal(node('projects').children[0].textContent,'논문 비교 보고서');
+  for(const [code,title] of [['s1','문헌검토 보고서'],['s2','자료 분석 보고서'],['s3','내부 웹 보고서']]){
+    context.legacyProject={name:'da76809ff19d-'+code,test:true};
+    assert.equal(vm.runInContext('projectTitle(legacyProject)',context),title);
+    assert.equal(vm.runInContext('projectLabel(legacyProject)',context),'설치 검증 '+code.toUpperCase());
+    assert.equal(context.legacyProject.name,'da76809ff19d-'+code);
+  }
+  assert.equal(vm.runInContext('projectTitle({name:"reports",test:false})',context),'연구 보고서');
+  assert.equal(vm.runInContext('projectTitle({name:"actual-s1",test:false})',context),'actual-s1');
+  assert.equal(vm.runInContext('projectTitle({name:"actual-s1",test:true,display_name:"사용자 지정 이름"})',context),'사용자 지정 이름');
   const card=cards().find(c=>c.dataset.task==='scout-01');card.onclick();
   assert.equal(node('detail-summary').textContent,'원문 5편의 근거를 추출했습니다.');
   assert.equal(node('detail').open,true);assert.equal(node('report-detail').open,false);
@@ -48,13 +57,36 @@ const cards=()=>node('tasks').children.flatMap(lane=>lane.children[1].children).
   await node('older').onclick();await settle();
   assert.match(node('event-count').textContent,/3건/);assert.equal(node('older').hidden,true);
   node('task-role').value='research-lead';node('task-role').onchange();assert.equal(cards().length,1);assert.equal(cards()[0].dataset.kind,'coordination');
-  assert.equal(cards()[0].children[1].children.length,2); // name + status only, no report/summary inventory
-  assert.equal(cards()[0].children[1].children[0].textContent,'총괄 후속 판단');
+  assert.equal(cards()[0].children.length,1); // one visible title, all other text belongs in detail
+  assert.equal(cards()[0].children[0].textContent,'총괄 후속 판단');
   node('file-search').value='result.docx';node('file-search').oninput();assert.match(node('document-count').textContent,/1개/);
   assert.ok(requests.every(r=>r.options.credentials==='same-origin'));
   const sequence=vm.runInContext("groups([{role:'research-scout'},{role:'research-scout'},{role:'research-reviewer'},{role:'research-scout'}]).map(g=>g.rows.length)",context);
   assert.deepEqual(Array.from(sequence),[2,1,1]);
   node('task-role').value='';
+  const suppliedSummary='작성 산출물 v1을 관리자 검토용으로 반환합니다. 요청 전체 완료·전달 승인은 아닙니다. · 크기: 46,371 bytes';
+  context.moveFixture={id:'move-project',tasks:[{id:'worker-01',assignee:'research-worker',kind:'task',title:'분석·보고서',status:'ready',summary:suppliedSummary,audit:'미통과',outputs:[]}]};
+  const laneFor=id=>node('tasks').children.find(lane=>lane.children[1].children.some(c=>c.dataset.task===id))?.dataset.bucket;
+  vm.runInContext('renderTasks(moveFixture)',context);
+  const movingCard=cards()[0];
+  assert.equal(movingCard.children.length,1);assert.equal(movingCard.children[0].textContent,'분석 보고서');
+  assert.equal(laneFor('worker-01'),'waiting');
+  for(const [status,lane] of [['running','active'],['blocked','attention'],['done','done']]){
+    context.moveFixture.tasks[0].status=status;
+    vm.runInContext('renderTasks(moveFixture)',context);
+    assert.equal(laneFor('worker-01'),lane);assert.equal(cards().length,1);assert.equal(cards()[0],movingCard);
+  }
+  movingCard.onclick();
+  assert.equal(node('detail-title').textContent,'분석 보고서');
+  assert.equal(node('detail-summary').textContent,suppliedSummary);
+  assert.match(node('detail-meta').textContent,/분석 · 완료 · 감사: 미통과/);
+  assert.ok(!movingCard.children.some(c=>c.textContent.includes('46,371')));
+  for(const [patch,lane] of [[{status:'ready',approval:true},'attention'],[{status:'failed',approval:false},'attention'],[{status:'partial'},'attention'],[{status:'unknown'},'attention'],[{status:'ready'},'waiting']]){
+    Object.assign(context.moveFixture.tasks[0],patch);vm.runInContext('renderTasks(moveFixture)',context);
+    assert.equal(laneFor('worker-01'),lane);assert.equal(cards()[0],movingCard);
+  }
+  context.moveFixture.tasks=[];vm.runInContext('renderTasks(moveFixture)',context);
+  assert.equal(cards().length,0);assert.equal(vm.runInContext('taskCards.size',context),0);
   context.sortFixture=[
     {id:'old-failure',origin_task:'same-work',kind:'coordination',assignee:'research-lead',status:'failed',updated:'2026-10-21T12:00:00Z'},
     {id:'latest-result',origin_task:'same-work',kind:'coordination',assignee:'research-lead',status:'done',updated:'2026-10-22T12:00:00Z'},
@@ -78,5 +110,6 @@ const cards=()=>node('tasks').children.flatMap(lane=>lane.children[1].children).
   assert.equal(node('summary-label').textContent,'제출 당시 요약');
   assert.match(node('detail-meta').textContent,/현재 기록:/);
   assert.ok(!source.includes('innerHTML'));assert.ok(!source.includes('eval('));
-  console.log('PASS readable project names, three status lanes, title-only cards, full opened summaries, strict historical audit distinction, folders and authenticated history pagination');
+  for(const name of ['app.js','app.css','index.html'])assert.equal(fs.readFileSync(path.join(__dirname,'../plugins/research-board/server/board-ui',name),'utf8'),fs.readFileSync(path.join(__dirname,'../team/shared/board-ui',name),'utf8'),'Mattermost embedded UI drift: '+name);
+  console.log('PASS compact title-only four-lane Kanban, queue/running separation, fail-closed states, same-card movement, full details, audit distinction and embedded UI parity');
 })().catch(e=>{console.error(e);process.exitCode=1;});
