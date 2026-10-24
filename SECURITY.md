@@ -68,7 +68,9 @@
 
 새 설치의 `repository` 단계는 RuntimeRoot 아래 예측 불가능한 UTF-8 no-BOM managed global 설정과 빈 attributes/excludes 파일을 `CreateNew`로 만들고 `core.autocrlf=false`를 clone 전에 적용합니다. fresh clone에서는 system Git 설정과 표준 네트워크 환경을 유지하지만 user global은 읽지 않습니다. 기존/재개 checkout의 모든 stage와 정적 검증은 managed global을 별도로 만들고 system 설정도 끕니다. 모든 모드에서 Git redirect/UI/trace 환경을 제거하고 `GIT_CONFIG_COUNT=2`로 `core.hooksPath=NUL`, `core.fsmonitor=false`를 고정하며, PATHEXT는 `.COM;.EXE;.BAT;.CMD`, PSModulePath는 System32 module로 제한합니다.
 
-공식 설치기는 각 stage 시작 시 registry User+Machine PATH로 process PATH를 덮어씁니다. 따라서 설치 시작 전과 매 stage 직전에 그 PATH를 파일 I/O로 순서대로 해석해 첫 `git` 후보가 정확한 서명된 Program Files `git.exe`인지 확인합니다. 경쟁 `git.com/.bat/.cmd/.ps1`, 빈·잘못된 PATH 항목은 실패-폐쇄되며, 이 검사를 통과하지 못하면 상류 프로세스를 시작하지 않습니다.
+공식 설치기는 각 stage 시작 시 registry User+Machine PATH로 process PATH를 덮어씁니다. 따라서 설치 시작 전과 매 stage 직전에 그 PATH를 파일 I/O로 순서대로 해석해 첫 `git` 후보가 서명된 Program Files `Git\cmd\git.exe` 또는 `Git\bin\git.exe`인지 독립 검증합니다. 경쟁 `git/.com/.bat/.cmd/.ps1`, 링크·재분석 지점, 잘못된 서명은 허용하지 않습니다. 비어 있는 사용자 PATH와 빈 구분자는 PowerShell의 실제 조회처럼 건너뛰되 현재 폴더로 해석하지 않습니다. 유효 경로가 전혀 없는 명령 조회, 상대·UNC·미확정 환경변수 항목은 차단합니다.
+
+Git이 설치돼 있지만 레지스트리 PATH에서 누락되거나 다른 Git이 먼저 발견되면, 그 후보는 실행하지 않고 검증한 Git 폴더 하나만 **User PATH 앞에 추가**합니다. 기존 항목 순서·내용과 Machine PATH는 그대로 둡니다. 전체 비어 있지 않은 PATH 항목의 형식을 먼저 검사하고, 계획 freshness·설치기 무결성 검증·설치 잠금 후 원래 User/Machine 값이 유지되는지 다시 확인합니다. 쓰기 전 RuntimeRoot의 독점 생성 `git-path-recovery-<id>.json`에 원래 값과 예상 값을 저장하고, 쓰기 후 실제 Git 해석을 재검증합니다. 실패 복구는 현 값이 예상 값과 정확히 일치할 때만 원래 User PATH를 복원합니다. 외부 프로그램과의 원자적 레지스트리 CAS를 보장하는 것은 아니며, 동시 변경이 확인되면 덮어쓰지 않고 중단합니다. 강제 종료 시에는 복구 JSON의 before/expected와 현재 PATH를 대조해 복구해야 합니다. 다른 명령의 경로·서명·attestation 검사는 별도로 유지합니다.
 
 fresh repository 직후에는 exact HEAD/origin, clean status, 빈 active local exclude와 non-reparse 경로를 in-memory proof로 묶습니다. path 직전에 proof와 launcher 원본을 다시 확인하고, 대응 `venv\Scripts` 파일과 길이·SHA-256이 같고 유효한 bounded PE 헤더를 가진 exact `bin/hermes.exe`/`hermes-acp.exe` 두 개만 `.git/info/exclude`에 CAS 방식으로 등록합니다.
 

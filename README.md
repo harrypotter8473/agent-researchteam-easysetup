@@ -1,4 +1,4 @@
-# NST Research Team Setup 0.22.1
+# NST Research Team Setup 0.22.2
 
 Windows PC에 Mattermost·Hermes·총괄/조사/분석/감사 3+1 연구팀을 구성하는 NST 전용 마법사입니다.
 한국어 작업보드와 NST 브랜딩을 Mattermost 안에 연결합니다.
@@ -40,14 +40,14 @@ Mattermost에는 중요한 보고와 결과만 남기고, 왼쪽 **연구 작업
 현재는 **프리릴리스**입니다. 무료 회귀와 실제 모델·새 PC 설치 검증은 다릅니다.
 0.21.2는 별도 프로필·기존 Mattermost의 새 검증 채널에서 실제 S1→S2→S3와 중간/최종 감사·총괄 첨부 해시 검증을 통과했습니다.
 0.22.0도 새 ZIP 추출본으로 격리 실제 S1·중간/최종 감사·총괄 Word 첨부 해시 검증을 통과했습니다.
-0.22.1은 카드 표시만 수정한 로컬 후보이며 UI 상태 이동·클릭 상세·기존 S1 기록 표시·추출 마법사를 별도로 검증합니다.
-0.22.1의 Mattermost 내부 보드도 같은 UI를 포함합니다. 보드 플러그인만 갱신할 수 있으며 실모델 S1/S2/S3를 새로 실행한 것은 아닙니다. [현재 검증 범위](docs/verification-0.22.1.md)를 확인하세요.
+0.22.1의 작은 네모 칸반 카드·클릭 상세·읽기 쉬운 S1/S2/S3 표시 이름을 유지합니다.
+0.22.2는 정상 Git 경로 인식과 사용자 PATH 최소 보정, 실제 차단 경로·이유 표시를 개선합니다. 시스템 PATH는 변경하지 않으며 기존 사용자 PATH 항목을 보존합니다. 실패 시 다른 변경과 충돌하지 않는 경우에만 복구합니다. [현재 검증 범위](docs/verification-0.22.2.md)를 확인하세요.
 새 Windows PC 전체 설치나 Word 모든 페이지의 시각적 배치까지 인증한 결과는 아닙니다.
 
 - PowerShell: `tests/Run-NstRegression.ps1 -IncludeDistribution` (Windows PowerShell 5.1 및 PowerShell 7).
 - Python: `python -B team/build_manifest.py --check`, `python -B -m unittest discover -s tests -p 'test_*.py' -v`.
 - 보드·플러그인: `node tests/test_board_ui.cjs`, `node tests/test_mattermost_plugin_webapp.cjs`, Go server tests.
-- 배포: `Build-Distributions.ps1 -DestinationRoot <소스 밖 별도 폴더>` → `NST-Research-Team-Setup-0.22.1.zip`과 SHA256SUMS.txt.
+- 배포: `Build-Distributions.ps1 -DestinationRoot <소스 밖 별도 폴더>` → `NST-Research-Team-Setup-0.22.2.zip`과 SHA256SUMS.txt.
 
 [설치 안내](docs/research-guide.ko.md) · [연구팀 구조](docs/research-team.md) · [작업보드](docs/research-board.ko.md) ·
-[플러그인](docs/mattermost-plugins.ko.md) · [복구](docs/recovery-guide.ko.md) · [검증 범위](docs/verification-0.22.1.md)
+[플러그인](docs/mattermost-plugins.ko.md) · [복구](docs/recovery-guide.ko.md) · [검증 범위](docs/verification-0.22.2.md)

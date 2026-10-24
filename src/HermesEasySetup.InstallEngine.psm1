@@ -481,19 +481,129 @@ function Get-HermesVerificationGitPath {
             $key = [System.IO.Path]::GetFullPath($candidate).ToLowerInvariant()
             if ($seen.ContainsKey($key)) { continue }
             $seen[$key] = $true
-            $trusted = Test-HermesGitCandidate -LiteralPath $candidate -RequireValidSignature
-            if ($trusted) { return $trusted }
+            $trusted = Get-HermesProgramFilesGitValidation -LiteralPath $candidate
+            if ($trusted.Valid) { return $trusted.Path }
         }
     }
 
     return $null
 }
 
+function Get-HermesProgramFilesGitValidation {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    $fail = { param($Code, $Reason) [pscustomobject]@{ Valid = $false; Code = $Code; Reason = $Reason; Path = $LiteralPath } }
+    try {
+        $full = [IO.Path]::GetFullPath($LiteralPath)
+        $allowed = $false
+        foreach ($root in @([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles), [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86))) {
+            if ([string]::IsNullOrWhiteSpace($root)) { continue }
+            foreach ($relative in @('Git\cmd\git.exe', 'Git\bin\git.exe')) {
+                if ([string]::Equals($full, (Join-Path $root $relative), [StringComparison]::OrdinalIgnoreCase)) { $allowed = $true }
+            }
+        }
+        if (-not $allowed) { return & $fail 'GitLocationNotAllowed' '공식 Program Files\Git\cmd 또는 bin의 git.exe가 아닙니다. 번들 Git·사용자 shim은 실행하지 않습니다.' }
+        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return & $fail 'GitFileMissing' 'Git 실행 파일이 없거나 일반 파일이 아닙니다.' }
+        $safety = Test-HermesSafeTargetPath -LiteralPath $full -Label 'Git 검증 실행 파일'
+        if (-not $safety.Safe -or ((Get-Item -LiteralPath $full -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return & $fail 'GitUnsafePath' 'Git 파일 또는 상위 경로가 링크·재분석 지점이거나 안전하지 않습니다.'
+        }
+        foreach ($name in @('git', 'git.com', 'git.cmd', 'git.bat', 'git.ps1')) {
+            $shadow = Join-Path (Split-Path -Parent $full) $name
+            if (Test-Path -LiteralPath $shadow) { return & $fail 'GitSiblingShadow' ("동일 폴더에 Git 명령을 가릴 수 있는 항목이 있습니다: $shadow") }
+        }
+        $signature = Get-HermesAuthenticodeSignature -LiteralPath $full
+        if ([string]$signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) {
+            return & $fail 'GitSignatureInvalid' ("Authenticode 서명이 유효하지 않습니다. 상태: $($signature.Status)")
+        }
+        $name = $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+        if ($name -cne 'Johannes Schindelin' -or [string]$signature.SignerCertificate.Subject -notmatch '(?i)(?:^|,\s*)O=Johannes Schindelin(?:\s*,|$)') {
+            return & $fail 'GitPublisherNotAllowed' ("허용한 Git for Windows 서명자가 아닙니다. 확인된 서명자: $name")
+        }
+        if ([string]::IsNullOrWhiteSpace((Test-HermesGitCandidate -LiteralPath $full -RequireValidSignature))) {
+            return & $fail 'GitValidationChanged' '재검사 중 Git 파일·경로·서명 상태가 변경되었습니다.'
+        }
+        return [pscustomobject]@{ Valid = $true; Code = $null; Reason = $null; Path = $full }
+    } catch { return & $fail 'GitInspectionFailed' ('Git 검사 실패: ' + (Protect-HermesLogText $_.Exception.Message)) }
+}
+
+function Format-HermesGitResolutionFailure {
+    param([Parameter(Mandatory = $true)]$Result)
+    $path = $(if ([string]::IsNullOrWhiteSpace([string]$Result.ResolvedPath)) { '(PATH에서 Git을 찾지 못함)' } else { [string]$Result.ResolvedPath })
+    return Protect-HermesLogText ("Git 안전 검사 차단. 경로: $path / 이유: $($Result.Reason)")
+}
+
+function New-HermesGitPathPreparation {
+    param([Parameter(Mandatory = $true)][string]$TrustedGitPath,
+        [Parameter(Mandatory = $true)][AllowNull()][AllowEmptyString()][AllowEmptyCollection()][object[]]$PathValues)
+    $original = Test-HermesRegistryGitResolution -TrustedGitPath $TrustedGitPath -PathValues $PathValues
+    # Validate every non-empty entry before proposing a write. Never repair a
+    # relative/UNC/unexpanded entry by silently hiding it behind a good Git.
+    foreach ($value in @($PathValues)) {
+        foreach ($entry in @(([string]$value).Split([char]';'))) {
+            if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+            if ([string]::IsNullOrWhiteSpace((ConvertTo-HermesComparablePathEntry -PathEntry $entry))) {
+                return [pscustomobject]@{ Valid = $false; Changed = $false; ResolvedPath = $entry; Reason = 'PATH 항목이 절대 로컬 경로가 아니거나 환경변수를 확정할 수 없습니다. 자동 삭제하지 않습니다.' }
+            }
+        }
+    }
+    if ($original.Valid) { return [pscustomobject]@{ Valid = $true; Changed = $false; Resolution = $original; PathValues = $PathValues } }
+    $trusted = Get-HermesProgramFilesGitValidation -LiteralPath $TrustedGitPath
+    if (-not $trusted.Valid -or @($PathValues).Count -ne 2) {
+        return [pscustomobject]@{ Valid = $false; Changed = $false; ResolvedPath = $TrustedGitPath; Reason = $(if (-not $trusted.Valid) { $trusted.Reason } else { 'User/Machine PATH 쌍을 확인하지 못했습니다.' }) }
+    }
+    $userPath = $PathValues[0]
+    $proposed = Split-Path -Parent $trusted.Path
+    if (-not [string]::IsNullOrEmpty($userPath)) { $proposed += ';' + $userPath }
+    if ($proposed.Length -gt 32760) { return [pscustomobject]@{ Valid = $false; Changed = $false; ResolvedPath = $trusted.Path; Reason = 'Git 경로 추가 시 사용자 PATH 길이 제한을 넘습니다. 기존 PATH는 변경하지 않았습니다.' } }
+    $values = @($proposed, $PathValues[1])
+    $verified = Test-HermesRegistryGitResolution -TrustedGitPath $trusted.Path -PathValues $values
+    return [pscustomobject]@{ Valid = $verified.Valid; Changed = $true; OriginalPathValues = $PathValues; PathValues = $values; Resolution = $verified; ResolvedPath = $verified.ResolvedPath; Reason = $verified.Reason; OriginalResolution = $original }
+}
+
+function Get-HermesRegistryPathValues {
+    return ,@([Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User), [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine))
+}
+
+function Set-HermesUserPathValue {
+    param([AllowNull()][string]$Value)
+    [Environment]::SetEnvironmentVariable('Path', $Value, [EnvironmentVariableTarget]::User)
+}
+
+function Set-HermesPreparedGitPath {
+    param([Parameter(Mandatory = $true)]$Preparation, [Parameter(Mandatory = $true)]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot, [Parameter(Mandatory = $true)][string]$TrustedGitPath)
+    if (-not $Preparation.Valid) { throw (Format-HermesGitResolutionFailure $Preparation) }
+    if (-not $Preparation.Changed) { return $null }
+    $current = Get-HermesRegistryPathValues
+    if (-not (Test-HermesEnvironmentValueExact $current[0] $Preparation.OriginalPathValues[0]) -or
+        -not (Test-HermesEnvironmentValueExact $current[1] $Preparation.OriginalPathValues[1]) -or
+        -not (Test-HermesEnvironmentValueExact $Snapshot.ExpectedPath $Preparation.OriginalPathValues[0])) {
+        throw '검사 후 User/Machine PATH가 변경되어 자동 보정을 중단했습니다. 다른 프로그램의 PATH를 덮어쓰지 않았습니다.'
+    }
+    $validation = Get-HermesProgramFilesGitValidation -LiteralPath $TrustedGitPath
+    if (-not $validation.Valid) { throw ('Git PATH 보정 직전 재검사 실패: ' + $validation.Reason) }
+    $journal = Join-Path $RuntimeRoot ('git-path-recovery-' + [guid]::NewGuid().ToString('N') + '.json')
+    $record = [ordered]@{ schemaVersion = 1; createdUtc = [DateTime]::UtcNow.ToString('o'); userPathBefore = $current[0]; userPathExpected = $Preparation.PathValues[0]; machinePath = $current[1]; git = $validation.Path }
+    Write-HermesExclusiveFile -LiteralPath $journal -Bytes (New-Object Text.UTF8Encoding($false)).GetBytes(($record | ConvertTo-Json -Depth 4))
+    # Update rollback expectation BEFORE the write, including a setter that
+    # writes successfully and then raises. Existing compare-before-restore
+    # rollback refuses to overwrite an unrelated concurrent PATH change.
+    $Snapshot.ExpectedPath = $Preparation.PathValues[0]
+    Set-HermesUserPathValue -Value $Preparation.PathValues[0]
+    $actual = Get-HermesRegistryPathValues
+    if (-not (Test-HermesEnvironmentValueExact $actual[0] $Preparation.PathValues[0]) -or
+        -not (Test-HermesEnvironmentValueExact $actual[1] $Preparation.OriginalPathValues[1]) -or
+        -not (Test-HermesRegistryGitResolution -TrustedGitPath $TrustedGitPath -PathValues $actual).Valid) {
+        throw '사용자 PATH 보정 후 재검사 실패. 복구 기록과 변경 충돌을 확인합니다.'
+    }
+    return $journal
+}
+
 function Test-HermesRegistryGitResolution {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)][string]$TrustedGitPath,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowNull()][string[]]$PathValues
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][AllowNull()][string[]]$PathValues
     )
 
     $failure = {
@@ -501,40 +611,38 @@ function Test-HermesRegistryGitResolution {
         return [pscustomobject]@{ Valid = $false; Reason = $Reason; ResolvedPath = $ResolvedPath }
     }
     try {
-        $trusted = Test-HermesGitCandidate -LiteralPath $TrustedGitPath -RequireValidSignature
-        if ([string]::IsNullOrWhiteSpace($trusted)) { return & $failure 'trusted Git candidate rejected' $null }
-        $trustedFull = [System.IO.Path]::GetFullPath($trusted)
+        $trusted = Get-HermesProgramFilesGitValidation -LiteralPath $TrustedGitPath
+        if (-not $trusted.Valid) { return & $failure ($trusted.Code + ': ' + $trusted.Reason) $TrustedGitPath }
         $candidateNames = @('git', 'git.com', 'git.exe', 'git.bat', 'git.cmd', 'git.ps1')
         $seenDirectories = @{}
         foreach ($pathValue in @($PathValues)) {
-            if ($null -eq $pathValue) { return & $failure 'missing registry PATH value rejected' $null }
+            # PowerShell PATH lookup skips missing/empty entries. Do not turn
+            # these into '.' or execute a candidate from the working directory.
+            if ([string]::IsNullOrWhiteSpace($pathValue)) { continue }
             foreach ($entry in @(([string]$pathValue).Split([char]';'))) {
-                if ([string]::IsNullOrWhiteSpace($entry)) { return & $failure 'empty registry PATH entry rejected' $null }
+                if ([string]::IsNullOrWhiteSpace($entry)) { continue }
                 $directory = ConvertTo-HermesComparablePathEntry -PathEntry ([string]$entry)
-                if ([string]::IsNullOrWhiteSpace($directory)) { return & $failure 'invalid registry PATH entry rejected' $null }
+                if ([string]::IsNullOrWhiteSpace($directory)) { return & $failure '절대 로컬 경로로 확정할 수 없는 PATH 항목입니다.' $entry }
                 $directoryKey = $directory.ToLowerInvariant()
                 if ($seenDirectories.ContainsKey($directoryKey)) { continue }
                 $seenDirectories[$directoryKey] = $true
                 foreach ($name in $candidateNames) {
                     $candidate = Join-Path $directory $name
                     if (-not (Test-Path -LiteralPath $candidate)) { continue }
-                    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { return & $failure 'non-file Git command candidate rejected' $candidate }
+                    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { return & $failure 'Git 명령 후보가 일반 파일이 아닙니다.' $candidate }
                     $candidateItem = Get-Item -LiteralPath $candidate -Force
-                    if (($candidateItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return & $failure 'reparse Git command candidate rejected' $candidate }
+                    if (($candidateItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return & $failure 'Git 명령 후보가 링크·재분석 지점입니다.' $candidate }
                     $candidateFull = [System.IO.Path]::GetFullPath($candidate)
-                    if (-not [string]::Equals($candidateFull, $trustedFull, [System.StringComparison]::OrdinalIgnoreCase)) {
-                        return & $failure 'registry PATH resolves Git to an untrusted candidate' $candidateFull
-                    }
-                    $validated = Test-HermesGitCandidate -LiteralPath $candidateFull -RequireValidSignature
-                    if ([string]::IsNullOrWhiteSpace($validated) -or
-                        -not [string]::Equals([System.IO.Path]::GetFullPath($validated), $trustedFull, [System.StringComparison]::OrdinalIgnoreCase)) {
-                        return & $failure 'registry PATH Git candidate validation failed' $candidateFull
+                    $validated = Get-HermesProgramFilesGitValidation -LiteralPath $candidateFull
+                    if (-not $validated.Valid) { return & $failure ($validated.Code + ': ' + $validated.Reason) $candidateFull }
+                    if ($entry.Contains('"') -or $entry.Contains('%') -or $entry -cne $entry.Trim()) {
+                        return & $failure ("Git 파일은 정상이지만 PATH 항목이 리터럴 폴더가 아니어서 실제 PowerShell 조회와 다를 수 있습니다: $entry") $candidateFull
                     }
                     return [pscustomobject]@{ Valid = $true; Reason = $null; ResolvedPath = $candidateFull }
                 }
             }
         }
-        return & $failure 'registry PATH does not resolve the trusted Git' $null
+        return & $failure 'User/Machine PATH에 검증된 Git 명령이 없습니다.' $null
     } catch {
         return & $failure 'registry PATH Git resolution inspection failed' $null
     }
@@ -894,18 +1002,18 @@ function Get-HermesRegistryBareCommandCandidates {
         if (@($PathValues).Count -eq 0) {
             return [pscustomobject]@{ Valid = $false; Absent = $false; Reason = 'missing registry PATH value rejected'; Candidates = @() }
         }
+        $hasDirectory = $false
         foreach ($pathValue in @($PathValues)) {
-            if ($null -eq $pathValue) {
-                return [pscustomobject]@{ Valid = $false; Absent = $false; Reason = 'missing registry PATH value rejected'; Candidates = @() }
-            }
+            if ([string]::IsNullOrWhiteSpace($pathValue)) { continue }
             foreach ($entry in @(([string]$pathValue).Split([char]';'))) {
                 if ([string]::IsNullOrWhiteSpace($entry)) {
-                    return [pscustomobject]@{ Valid = $false; Absent = $false; Reason = 'empty registry PATH entry rejected'; Candidates = @() }
+                    continue
                 }
                 $directory = ConvertTo-HermesComparablePathEntry -PathEntry ([string]$entry)
                 if ([string]::IsNullOrWhiteSpace($directory)) {
-                    return [pscustomobject]@{ Valid = $false; Absent = $false; Reason = 'invalid registry PATH entry rejected'; Candidates = @() }
+                    return [pscustomobject]@{ Valid = $false; Absent = $false; Reason = 'invalid registry PATH entry rejected'; BlockedPath = $entry; Candidates = @() }
                 }
+                $hasDirectory = $true
                 $candidates = New-Object 'System.Collections.Generic.List[string]'
                 foreach ($extension in $script:HermesBareCommandExtensions) {
                     $candidate = Join-Path $directory ($CommandName + $extension)
@@ -916,10 +1024,14 @@ function Get-HermesRegistryBareCommandCandidates {
                     $candidates.Add([System.IO.Path]::GetFullPath($candidate))
                 }
                 if ($candidates.Count -gt 0) {
+                    if ($entry.Contains('"') -or $entry.Contains('%') -or $entry -cne $entry.Trim()) {
+                        return [pscustomobject]@{ Valid = $false; Absent = $false; Reason = '명령 후보의 PATH 항목에 따옴표·미확장 변수·바깥 공백이 있어 실제 PowerShell 조회와 일치를 보장할 수 없습니다.'; BlockedPath = $entry; Candidates = @() }
+                    }
                     return [pscustomobject]@{ Valid = $true; Absent = $false; Reason = $null; Candidates = $candidates.ToArray() }
                 }
             }
         }
+        if (-not $hasDirectory) { return [pscustomobject]@{ Valid = $false; Absent = $false; Reason = 'missing registry PATH directories rejected'; Candidates = @() } }
         return [pscustomobject]@{ Valid = $true; Absent = $true; Reason = $null; Candidates = @() }
     } catch {
         return [pscustomobject]@{ Valid = $false; Absent = $false; Reason = 'registry PATH command inspection failed'; Candidates = @() }
@@ -1043,7 +1155,7 @@ function Assert-HermesFreshManagedCommandSeed {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]$Plan,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowNull()][string[]]$PathValues
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][AllowNull()][string[]]$PathValues
     )
 
     foreach ($path in @(
@@ -1199,7 +1311,7 @@ function Update-HermesManagedCommandProofAfterStage {
         [Parameter(Mandatory = $true)]$Plan,
         [Parameter(Mandatory = $true)][hashtable]$ManagedCommandProof,
         [Parameter(Mandatory = $true)][string]$Stage,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowNull()][string[]]$PathValues
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][AllowNull()][string[]]$PathValues
     )
 
     $specifications = @()
@@ -1251,9 +1363,7 @@ function Test-HermesTrustedBareCommandCandidate {
         ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
 
         if ($CommandName -eq 'git') {
-            $validated = Test-HermesGitCandidate -LiteralPath $candidate -RequireValidSignature
-            return (-not [string]::IsNullOrWhiteSpace($validated) -and
-                [string]::Equals([System.IO.Path]::GetFullPath($validated), [System.IO.Path]::GetFullPath($TrustedGitPath), [System.StringComparison]::OrdinalIgnoreCase))
+            return (Get-HermesProgramFilesGitValidation -LiteralPath $candidate).Valid
         }
 
         if (@('cmd', 'schtasks', 'taskkill', 'icacls', 'ie4uinit') -contains $CommandName) {
@@ -1371,7 +1481,7 @@ function Test-HermesStageBareCommandResolution {
         [Parameter(Mandatory = $true)]$Plan,
         [Parameter(Mandatory = $true)][string]$Stage,
         [Parameter(Mandatory = $true)][string]$TrustedGitPath,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowNull()][string[]]$PathValues,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][AllowNull()][string[]]$PathValues,
         [AllowNull()]$ManagedCommandProof
     )
 
@@ -1388,7 +1498,8 @@ function Test-HermesStageBareCommandResolution {
         if ($commandName -eq 'cua-driver' -and $Plan.PSObject.Properties.Name -contains 'SkipComputerUse' -and [bool]$Plan.SkipComputerUse) { continue }
         $resolution = Get-HermesRegistryBareCommandCandidates -CommandName ([string]$commandName) -PathValues $PathValues
         if (-not $resolution.Valid) {
-            return [pscustomobject]@{ Valid = $false; Reason = [string]$resolution.Reason; Command = [string]$commandName; ResolvedPaths = $resolvedPaths.ToArray(); MissingCommands = $missingCommands.ToArray() }
+            $blocked = $(if ($resolution.PSObject.Properties.Name -contains 'BlockedPath') { [string]$resolution.BlockedPath } else { '(PATH 항목을 확정하지 못함)' })
+            return [pscustomobject]@{ Valid = $false; Reason = [string]$resolution.Reason; Command = [string]$commandName; BlockedPath = $blocked; ResolvedPaths = $resolvedPaths.ToArray(); MissingCommands = $missingCommands.ToArray() }
         }
         if ([bool]$resolution.Absent) {
             $missingCommands.Add([string]$commandName)
@@ -1406,6 +1517,7 @@ function Test-HermesStageBareCommandResolution {
             if (-not (Test-HermesTrustedBareCommandCandidate -Plan $Plan -CommandName ([string]$commandName) -LiteralPath ([string]$candidate) -TrustedGitPath $TrustedGitPath -ManagedCommandProof $ManagedCommandProof)) {
                 $reason = '허용된 실행 파일·경로·서명 또는 설치 검증 기록을 확인하지 못했습니다.'
                 if ($commandName -ceq 'python') { $reason = [string](Get-HermesPythonCandidateValidation -LiteralPath ([string]$candidate)).Reason }
+                if ($commandName -ceq 'git') { $reason = [string](Get-HermesProgramFilesGitValidation -LiteralPath ([string]$candidate)).Reason }
                 return [pscustomobject]@{ Valid = $false; Reason = $reason; Command = [string]$commandName; BlockedPath = [string]$candidate; ResolvedPaths = $resolvedPaths.ToArray(); MissingCommands = $missingCommands.ToArray() }
             }
             $resolvedPaths.Add([string]$candidate)
@@ -2401,10 +2513,10 @@ function Restore-HermesRejectedUserPathExposure {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Snapshot, [Parameter(Mandatory = $true)]$Plan)
 
-    $currentPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User)
+    $currentPath = (Get-HermesRegistryPathValues)[0]
     if (Test-HermesEnvironmentValueExact -Left $currentPath -Right $Snapshot.UserPath) { return $true }
     if (Test-HermesEnvironmentValueExact -Left $currentPath -Right $Snapshot.ExpectedPath) {
-        [Environment]::SetEnvironmentVariable('Path', $Snapshot.UserPath, [EnvironmentVariableTarget]::User)
+        Set-HermesUserPathValue -Value $Snapshot.UserPath
         return $true
     }
     return $false
@@ -3066,15 +3178,30 @@ function Invoke-HermesInstall {
     }
     $trustedGit = Get-HermesVerificationGitPath -HermesHome $paths.HermesHome
     if ([string]::IsNullOrWhiteSpace($trustedGit)) {
-        Throw-HermesEasySetupError -Message 'Program Files에 유효하게 서명된 Git for Windows가 필요합니다. 공식 Git for Windows를 먼저 설치한 뒤 다시 실행하세요.' -ExitCode 10 -Category 'Preflight'
+        $gitDetails = @()
+        foreach ($root in @([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles), [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86))) {
+            if ([string]::IsNullOrWhiteSpace($root)) { continue }
+            foreach ($relative in @('Git\cmd\git.exe', 'Git\bin\git.exe')) {
+                $detail = Get-HermesProgramFilesGitValidation -LiteralPath (Join-Path $root $relative)
+                $gitDetails += Protect-HermesLogText ("$($detail.Path) / $($detail.Code): $($detail.Reason)")
+            }
+        }
+        Throw-HermesEasySetupError -Message ('검증된 Program Files Git을 찾지 못했습니다. 공식 Git for Windows 설치·복구가 필요합니다. 확인 경로와 이유: ' + ($gitDetails -join '; ')) -ExitCode 10 -Category 'Preflight'
     }
     $initialRegistryPathValues = @(
         [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User),
         [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine)
     )
-    $initialRegistryGit = Test-HermesRegistryGitResolution -TrustedGitPath $trustedGit -PathValues $initialRegistryPathValues
-    if (-not $initialRegistryGit.Valid) {
-        Throw-HermesEasySetupError -Message '공식 설치기가 다시 읽는 User/Machine PATH에서 서명된 Program Files Git이 첫 git 명령이어야 합니다.' -ExitCode 10 -Category 'Preflight'
+    $gitPathPreparation = New-HermesGitPathPreparation -TrustedGitPath $trustedGit -PathValues $initialRegistryPathValues
+    if (-not $gitPathPreparation.Valid) {
+        Throw-HermesEasySetupError -Message (Format-HermesGitResolutionFailure $gitPathPreparation) -ExitCode 10 -Category 'Preflight'
+    }
+    $initialRegistryGit = $gitPathPreparation.Resolution
+    $initialRegistryPathValues = $gitPathPreparation.PathValues
+    $trustedGit = [string]$initialRegistryGit.ResolvedPath
+    [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'log' -State 'verified' -Message ("인식한 Git: $trustedGit (Program Files 경로·Authenticode 서명·명령 가림 검사 통과).") -Percent 2)
+    if ($gitPathPreparation.Changed) {
+        [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'log' -State 'pending' -Message ((Format-HermesGitResolutionFailure $gitPathPreparation.OriginalResolution) + ' / 처리: 실행하지 않고 검증된 Git 폴더만 사용자 PATH 앞에 추가합니다. 기존 항목과 시스템 PATH는 보존합니다.') -Percent 2)
     }
     $trustedGitBash = Get-HermesTrustedGitBashPath -TrustedGitPath ([string]$initialRegistryGit.ResolvedPath)
     if ([string]::IsNullOrWhiteSpace($trustedGitBash) -or -not (Test-HermesTrustedGitBashCompatibility -BashPath $trustedGitBash)) {
@@ -3155,6 +3282,12 @@ function Invoke-HermesInstall {
         } else {
             $state = New-HermesInstallState -Plan $freshPlan -Manifest $manifest
         }
+        if ($gitPathPreparation.Changed) {
+            $gitPathJournal = Set-HermesPreparedGitPath -Preparation $gitPathPreparation -Snapshot $pathExposureSnapshot -RuntimeRoot $paths.RuntimeRoot -TrustedGitPath $trustedGit
+            $pathMessage = "검증된 Git 경로를 사용자 PATH 앞에 추가했습니다. 시스템 PATH·기존 항목은 보존했습니다. 실패 시 변경 충돌을 확인해 복구합니다. 복구 기록: $gitPathJournal"
+            Write-HermesEasySetupLog -LiteralPath $logPath -Message $pathMessage
+            [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'log' -State 'verified' -Message $pathMessage -Percent 11)
+        }
         [void](Save-HermesInstallState -LiteralPath $paths.StateFile -State $state)
 
         $powershell = Get-HermesPowerShellExecutable
@@ -3190,7 +3323,7 @@ function Invoke-HermesInstall {
             }
             $stageRegistryGit = Test-HermesRegistryGitResolution -TrustedGitPath $trustedGit -PathValues $stageRegistryPathValues
             if (-not $stageRegistryGit.Valid) {
-                Throw-HermesEasySetupError -Message "단계 '$name' 직전 User/Machine PATH의 git 해석이 신뢰 경계를 벗어났습니다." -ExitCode 10 -Category 'Preflight'
+                Throw-HermesEasySetupError -Message ("단계 '$name' 직전: " + (Format-HermesGitResolutionFailure $stageRegistryGit)) -ExitCode 10 -Category 'Preflight'
             }
             $stageBareCommands = Test-HermesStageBareCommandResolution -Plan $freshPlan -Stage $name -TrustedGitPath $trustedGit -PathValues $stageRegistryPathValues -ManagedCommandProof $managedCommandProof
             if (-not $stageBareCommands.Valid) {
