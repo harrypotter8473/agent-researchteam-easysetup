@@ -72,9 +72,13 @@
 
 Git이 설치돼 있지만 레지스트리 PATH에서 누락되거나 다른 Git이 먼저 발견되면, 그 후보는 실행하지 않고 검증한 Git 폴더 하나만 **User PATH 앞에 추가**합니다. 기존 항목 순서·내용과 Machine PATH는 그대로 둡니다. 전체 비어 있지 않은 PATH 항목의 형식을 먼저 검사하고, 계획 freshness·설치기 무결성 검증·설치 잠금 후 원래 User/Machine 값이 유지되는지 다시 확인합니다. 쓰기 전 RuntimeRoot의 독점 생성 `git-path-recovery-<id>.json`에 원래 값과 예상 값을 저장하고, 쓰기 후 실제 Git 해석을 재검증합니다. 실패 복구는 현 값이 예상 값과 정확히 일치할 때만 원래 User PATH를 복원합니다. 외부 프로그램과의 원자적 레지스트리 CAS를 보장하는 것은 아니며, 동시 변경이 확인되면 덮어쓰지 않고 중단합니다. 강제 종료 시에는 복구 JSON의 before/expected와 현재 PATH를 대조해 복구해야 합니다. 다른 명령의 경로·서명·attestation 검사는 별도로 유지합니다.
 
+0.22.3은 REG_EXPAND_SZ User PATH가 격리된 USERPROFILE/LOCALAPPDATA로 확장되는 것을 막기 위해 실제 사용자 기준 확장 값을 자식 실행 전에 REG_SZ로 고정할 수 있습니다. 이때 항목의 확장된 의미·순서는 유지하고 원래 문자열·형식을 로컬 기록에 보존합니다. 매 stage의 실제 자식 환경에서도 User/Machine PATH 변수 확장이 같은지 확인하며, Machine PATH는 자동 변경하지 않습니다. 환경 검증 실패에는 항목별 예상/실제 경로가 표시됩니다. 실패 복구는 현재 원본 형식까지 예상된 쓰기와 일치할 때만 수행하며, 원래 레지스트리 형식 복원 후 Windows에 환경 변경을 알립니다.
+
+실패 후 fresh 복구에서는 동일 plan/source/installer SHA, repository·dependencies 성공 기록 및 path 시도 기록, 실제 공식 HEAD/origin/index/설정/clean 검사를 모두 요구한 뒤 exact InstallDir/bin User PATH 항목만 제거합니다. 완료 marker/attestation 또는 해당 경로를 사용하는 프로세스가 있으면 자동 정리하지 않습니다. 원본 PATH·이전 실패 기록을 독점 생성 JSON에 보존하며 다른 항목을 추측해 복원하지 않습니다. 미검증 파일은 일반 로컬 복구 폴더로 이동해 보존하고 공식 단계를 재적용합니다. 복구 목적지가 reparse point면 이동 전에 거부합니다. 프로필·인증·서버는 정리 대상에 포함하지 않습니다.
+
 fresh repository 직후에는 exact HEAD/origin, clean status, 빈 active local exclude와 non-reparse 경로를 in-memory proof로 묶습니다. path 직전에 proof와 launcher 원본을 다시 확인하고, 대응 `venv\Scripts` 파일과 길이·SHA-256이 같고 유효한 bounded PE 헤더를 가진 exact `bin/hermes.exe`/`hermes-acp.exe` 두 개만 `.git/info/exclude`에 CAS 방식으로 등록합니다.
 
-그 직후 RuntimeRoot의 `state\launcher-attestation-v1.json`을 strict UTF-8 canonical JSON으로 한 번만 발행합니다. schema, contract, HermesHome/InstallDir/RuntimeRoot path binding SHA-256, peeled commit, 설치기 SHA-256, 두 launcher 이름·길이·SHA-256을 묶으며 기존 파일은 바이트가 완전히 같은 경우 외에는 교체하지 않습니다. 기존/재개 checkout은 이 attestation과 전체 정적 provenance가 이미 맞는 경우만 읽기 전용으로 허용합니다. 일반 caught failure는 이번 실행이 쓴 attestation을 제거하므로, 재개는 attestation과 동일 checkpoint가 남은 제한적 비정상 종료에만 가능합니다.
+그 직후 RuntimeRoot의 `state\launcher-attestation-v1.json`을 strict UTF-8 canonical JSON으로 한 번만 발행합니다. schema, contract, HermesHome/InstallDir/RuntimeRoot path binding SHA-256, peeled commit, 설치기 SHA-256, 두 launcher 이름·길이·SHA-256을 묶으며 기존 파일은 바이트가 완전히 같은 경우 외에는 교체하지 않습니다. 기존/재개 checkout의 파일은 이 attestation과 전체 정적 provenance가 이미 맞는 경우만 신뢰해 재사용합니다. 미완성 상태의 미검증 파일은 직접 실행하지 않으며, 검증된 실패 복구는 보존 격리 후 새 공식 단계 적용 경로로 처리합니다.
 
 repository-aware Git 전에 raw `.git/config`의 exact allowlist(상류의 단일 `windows.appendAtomically=false` 포함)를 적용하고 `commondir`, `config.worktree`, active `.git/info/attributes`, object alternates를 거부합니다. 그 뒤에만 격리된 서명 Git으로 raw origin, top-level/absolute git-dir, expected HEAD/index tree, index flags, gitlink 부재와 clean status를 검사합니다. Hermes 실행 직전 launcher와 attestation을 다시 확인합니다.
 

@@ -1,5 +1,7 @@
 ﻿Set-StrictMode -Version 2.0
 
+. (Join-Path $PSScriptRoot 'HermesEasySetup.InstallRecovery.ps1')
+
 $script:HermesManagedLauncherNames = @('hermes.exe', 'hermes-acp.exe')
 $script:HermesManagedLauncherPatterns = @('/bin/hermes.exe', '/bin/hermes-acp.exe')
 $script:HermesBareCommandExtensions = @('.com', '.exe', '.bat', '.cmd', '.ps1')
@@ -582,8 +584,14 @@ function Set-HermesPreparedGitPath {
     }
     $validation = Get-HermesProgramFilesGitValidation -LiteralPath $TrustedGitPath
     if (-not $validation.Valid) { throw ('Git PATH 보정 직전 재검사 실패: ' + $validation.Reason) }
+    $rawBefore = $null
+    if ($Snapshot.PSObject.Properties.Name -contains 'OriginalEnvironmentRecords') {
+        $rawBefore = $Snapshot.OriginalEnvironmentRecords
+        if (-not (Test-HermesEnvironmentRecordExact $rawBefore.UserPath (Get-HermesUserEnvironmentRecord Path)) -or
+            -not (Test-HermesEnvironmentRecordExact $rawBefore.MachinePath (Get-HermesMachinePathRecord))) { throw 'PATH의 원래 문자열·레지스트리 형식이 검사 후 변경되었습니다. 보정하지 않습니다.' }
+    }
     $journal = Join-Path $RuntimeRoot ('git-path-recovery-' + [guid]::NewGuid().ToString('N') + '.json')
-    $record = [ordered]@{ schemaVersion = 1; createdUtc = [DateTime]::UtcNow.ToString('o'); userPathBefore = $current[0]; userPathExpected = $Preparation.PathValues[0]; machinePath = $current[1]; git = $validation.Path }
+    $record = [ordered]@{ schemaVersion = 1; createdUtc = [DateTime]::UtcNow.ToString('o'); userPathBefore = $current[0]; userPathExpected = $Preparation.PathValues[0]; machinePath = $current[1]; git = $validation.Path; originalEnvironmentRecords = $rawBefore }
     Write-HermesExclusiveFile -LiteralPath $journal -Bytes (New-Object Text.UTF8Encoding($false)).GetBytes(($record | ConvertTo-Json -Depth 4))
     # Update rollback expectation BEFORE the write, including a setter that
     # writes successfully and then raises. Existing compare-before-restore
@@ -595,6 +603,10 @@ function Set-HermesPreparedGitPath {
         -not (Test-HermesEnvironmentValueExact $actual[1] $Preparation.OriginalPathValues[1]) -or
         -not (Test-HermesRegistryGitResolution -TrustedGitPath $TrustedGitPath -PathValues $actual).Valid) {
         throw '사용자 PATH 보정 후 재검사 실패. 복구 기록과 변경 충돌을 확인합니다.'
+    }
+    if ($null -ne $rawBefore) {
+        $written=Get-HermesUserEnvironmentRecord Path
+        if ($written.Kind -cne 'String' -or $written.Value -cne $Preparation.PathValues[0] -or -not (Test-HermesEnvironmentRecordExact $rawBefore.MachinePath (Get-HermesMachinePathRecord))) { throw 'PATH 보정 후 리터럴 문자열 또는 Machine PATH 보존 검사가 실패했습니다.' }
     }
     return $journal
 }
@@ -1228,7 +1240,9 @@ function Move-HermesResumeManagedSeedToQuarantine {
     }
 
     $recoveryRoot = Join-Path $runtimeFull 'recovery'
+    if (-not (Test-HermesOrdinaryDirectoryPathUnderRoot -LiteralPath $runtimeFull -RootPath ([IO.Path]::GetPathRoot($runtimeFull)))) { throw 'Resume runtime root is not an ordinary local path' }
     if (-not (Test-Path -LiteralPath $recoveryRoot -PathType Container)) { New-Item -ItemType Directory -Path $recoveryRoot -Force | Out-Null }
+    if (-not (Test-HermesOrdinaryDirectoryPathUnderRoot -LiteralPath $recoveryRoot -RootPath $runtimeFull)) { throw 'Resume recovery destination escaped RuntimeRoot or is a reparse point' }
     $quarantineRoot = Join-Path $recoveryRoot ((Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss-fff') + '-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $quarantineRoot | Out-Null
     $moved = New-Object System.Collections.Generic.List[object]
@@ -2355,10 +2369,11 @@ function Get-HermesPathStageEnvironmentSnapshot {
         [Parameter(Mandatory = $true)][string]$TrustedGitBashPath
     )
 
-    $userPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User)
-    $machinePath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine)
-    $userHermesHome = [Environment]::GetEnvironmentVariable('HERMES_HOME', [EnvironmentVariableTarget]::User)
-    $userGitBashPath = [Environment]::GetEnvironmentVariable('HERMES_GIT_BASH_PATH', [EnvironmentVariableTarget]::User)
+    $registryPaths = Get-HermesRegistryPathValues
+    $userPath = $registryPaths[0]
+    $machinePath = $registryPaths[1]
+    $userHermesHome = Get-HermesUserEnvironmentValue HERMES_HOME
+    $userGitBashPath = Get-HermesUserEnvironmentValue HERMES_GIT_BASH_PATH
     $launcherDirectory = [System.IO.Path]::GetFullPath((Join-Path ([string]$Plan.InstallDir) 'bin'))
 
     return [pscustomobject]@{
@@ -2374,6 +2389,7 @@ function Get-HermesPathStageEnvironmentSnapshot {
         PathStageApplied = $false
         LauncherDirectory = $launcherDirectory
         LauncherEntryPresent = (Test-HermesPathContainsDirectory -PathValues @($userPath, $machinePath) -Directory $launcherDirectory)
+        OriginalEnvironmentRecords = (Get-HermesPersistentEnvironmentRecords)
     }
 }
 
@@ -2471,9 +2487,9 @@ function Test-HermesPersistentEnvironmentPostcondition {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Snapshot, [Parameter(Mandatory = $true)]$Plan)
 
-    $actualPath = [Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User)
-    $actualHermesHome = [Environment]::GetEnvironmentVariable('HERMES_HOME', [EnvironmentVariableTarget]::User)
-    $actualGitBashPath = [Environment]::GetEnvironmentVariable('HERMES_GIT_BASH_PATH', [EnvironmentVariableTarget]::User)
+    $actualPath = (Get-HermesRegistryPathValues)[0]
+    $actualHermesHome = Get-HermesUserEnvironmentValue HERMES_HOME
+    $actualGitBashPath = Get-HermesUserEnvironmentValue HERMES_GIT_BASH_PATH
     $pathExact = Test-HermesEnvironmentValueExact -Left $actualPath -Right $Snapshot.ExpectedPath
     $homeExact = Test-HermesEnvironmentValueExact -Left $actualHermesHome -Right $Snapshot.ExpectedHermesHome
     $gitBashExact = Test-HermesEnvironmentValueExact -Left $actualGitBashPath -Right $Snapshot.ExpectedGitBashPath
@@ -2484,6 +2500,9 @@ function Test-HermesPersistentEnvironmentPostcondition {
         PathValid = ($pathExact -and $launcherPresent)
         HermesHomeValid = $homeExact
         GitBashPathValid = $gitBashExact
+        ActualPath = $actualPath
+        ActualHermesHome = $actualHermesHome
+        ActualGitBashPath = $actualGitBashPath
     }
 }
 
@@ -2513,6 +2532,9 @@ function Restore-HermesRejectedUserPathExposure {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Snapshot, [Parameter(Mandatory = $true)]$Plan)
 
+    if ($Snapshot.PSObject.Properties.Name -contains 'OriginalEnvironmentRecords') {
+        return (Restore-HermesOriginalEnvironmentRecord -Snapshot $Snapshot -Name Path -RecordProperty UserPath -ExpectedValue $Snapshot.ExpectedPath)
+    }
     $currentPath = (Get-HermesRegistryPathValues)[0]
     if (Test-HermesEnvironmentValueExact -Left $currentPath -Right $Snapshot.UserPath) { return $true }
     if (Test-HermesEnvironmentValueExact -Left $currentPath -Right $Snapshot.ExpectedPath) {
@@ -2526,6 +2548,9 @@ function Restore-HermesRejectedHermesHomeExposure {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Snapshot, [Parameter(Mandatory = $true)]$Plan)
 
+    if ($Snapshot.PSObject.Properties.Name -contains 'OriginalEnvironmentRecords') {
+        return (Restore-HermesOriginalEnvironmentRecord -Snapshot $Snapshot -Name HERMES_HOME -RecordProperty UserHome -ExpectedValue $Snapshot.ExpectedHermesHome)
+    }
     $currentHermesHome = [Environment]::GetEnvironmentVariable('HERMES_HOME', [EnvironmentVariableTarget]::User)
     if (Test-HermesEnvironmentValueExact -Left $currentHermesHome -Right $Snapshot.UserHermesHome) { return $true }
     if (Test-HermesEnvironmentValueExact -Left $currentHermesHome -Right $Snapshot.ExpectedHermesHome) {
@@ -2539,6 +2564,9 @@ function Restore-HermesRejectedGitBashExposure {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)]$Snapshot)
 
+    if ($Snapshot.PSObject.Properties.Name -contains 'OriginalEnvironmentRecords') {
+        return (Restore-HermesOriginalEnvironmentRecord -Snapshot $Snapshot -Name HERMES_GIT_BASH_PATH -RecordProperty UserGitBash -ExpectedValue $Snapshot.ExpectedGitBashPath)
+    }
     $current = [Environment]::GetEnvironmentVariable('HERMES_GIT_BASH_PATH', [EnvironmentVariableTarget]::User)
     if (Test-HermesEnvironmentValueExact -Left $current -Right $Snapshot.UserGitBashPath) { return $true }
     $trustedEquivalent = $false
@@ -3216,6 +3244,7 @@ function Invoke-HermesInstall {
         }
     }
     $pathExposureSnapshot = Get-HermesPathStageEnvironmentSnapshot -Plan $plan -TrustedGitBashPath $trustedGitBash
+    $gitPathPreparation = Add-HermesPathMaterializationPreparation -Preparation $gitPathPreparation -Snapshot $pathExposureSnapshot
 
     foreach ($directory in @($paths.RuntimeRoot, $paths.LogDir, $paths.StateDir)) {
         if (-not (Test-Path -LiteralPath $directory -PathType Container)) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
@@ -3230,6 +3259,8 @@ function Invoke-HermesInstall {
     $launcherExcludeWrite = $null
     $launcherAttestationWrite = $null
     $resumeQuarantine = $null
+    $needsResumeQuarantine = $false
+    $existingGate = $null
     $useExistingCheckout = [bool]$preflight.ExistingCheckout
     $freshPlan = $plan
     try {
@@ -3247,21 +3278,10 @@ function Invoke-HermesInstall {
             if ($existingGate.StaticProvenanceValid -and $existingAttestationGate.Valid) {
                 $managedCommandProof = $existingAttestationGate.ManagedCommandProof
             } else {
-                try {
-                    $resumeQuarantine = Move-HermesResumeManagedSeedToQuarantine -Plan $plan -State $prior
-                    Assert-HermesFreshManagedCommandSeed -Plan $plan -PathValues $initialRegistryPathValues
-                    $useExistingCheckout = $false
-                } catch {
-                    Throw-HermesEasySetupError -Message "증명되지 않은 미완성 checkout을 복구 격리하지 못했습니다: $(Protect-HermesLogText $_.Exception.Message)" -ExitCode 10 -Category 'Preflight'
-                }
+                $needsResumeQuarantine = $true
             }
         } elseif ($Resume) {
-            try {
-                $resumeQuarantine = Move-HermesResumeManagedSeedToQuarantine -Plan $plan -State $prior
-                Assert-HermesFreshManagedCommandSeed -Plan $plan -PathValues $initialRegistryPathValues
-            } catch {
-                Throw-HermesEasySetupError -Message "실패 설치의 관리 경로를 복구 격리하지 못했습니다: $(Protect-HermesLogText $_.Exception.Message)" -ExitCode 10 -Category 'Preflight'
-            }
+            $needsResumeQuarantine = $true
         }
         $installer = Get-HermesVerifiedInstaller -SourceConfig $sourceConfig -Paths $paths -ForceDownload:$ForceDownload -Downloader $Downloader -ProgressCallback $ProgressCallback -LogPath $logPath
         $manifest = Get-HermesInstallerManifest -InstallerPath $installer.Path -Plan $plan -SourceConfig $sourceConfig -LogPath $logPath -ProgressCallback $ProgressCallback
@@ -3271,6 +3291,36 @@ function Invoke-HermesInstall {
             Throw-HermesEasySetupError -Message '첫 변경 직전 계획 freshness 검사에 실패했습니다. 다시 진단하고 승인하세요.' -ExitCode 2 -Category 'PlanApproval'
         }
 
+        if ($Resume -and -not (Test-HermesStateCanResume -State $prior -Plan $freshPlan -Manifest $manifest)) {
+            Throw-HermesEasySetupError -Message '실패 체크포인트가 검증된 현재 manifest와 다릅니다. 기존 설치·PATH는 변경하지 않습니다.' -ExitCode 2 -Category 'Resume'
+        }
+        if ($needsResumeQuarantine) {
+            # Validate ownership and actual source before removing the exact
+            # failed launcher exposure; never remove a whole user PATH.
+            Assert-HermesFailedInstallNotInUse -Plan $freshPlan
+            $cleanup = Get-HermesFailedLauncherPathRecovery -Plan $freshPlan -State $prior -Verification $existingGate -InstallerSha256 $installer.Sha256 -PathValues (Get-HermesRegistryPathValues)
+            $cleanupJournal = Invoke-HermesFailedLauncherPathRecovery -Preparation $cleanup -Plan $freshPlan -State $prior
+            if ($cleanup.Changed) {
+                $message="실패한 동일 설치의 실행 경로만 사용자 PATH에서 정리했습니다: $($cleanup.Launcher). 기존 항목·시스템 PATH·프로필은 보존했습니다. 기록: $cleanupJournal"
+                Write-HermesEasySetupLog -LiteralPath $logPath -Message $message
+                [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'resume' -State 'recovered' -Message $message -Percent 10)
+            }
+            # A cleaned failed exposure is the new safe baseline. Do not put
+            # it back when another install stage subsequently fails.
+            $pathExposureSnapshot = Get-HermesPathStageEnvironmentSnapshot -Plan $freshPlan -TrustedGitBashPath $trustedGitBash
+            $initialRegistryPathValues = Get-HermesRegistryPathValues
+            $gitPathPreparation = New-HermesGitPathPreparation -TrustedGitPath $trustedGit -PathValues $initialRegistryPathValues
+            if (-not $gitPathPreparation.Valid) { throw (Format-HermesGitResolutionFailure $gitPathPreparation) }
+            $gitPathPreparation = Add-HermesPathMaterializationPreparation -Preparation $gitPathPreparation -Snapshot $pathExposureSnapshot
+            $resumeQuarantine = Move-HermesResumeManagedSeedToQuarantine -Plan $freshPlan -State $prior
+            Assert-HermesFreshManagedCommandSeed -Plan $freshPlan -PathValues $gitPathPreparation.PathValues
+            $useExistingCheckout = $false
+        }
+        if ($Resume) {
+            $archive = Join-Path $paths.RuntimeRoot ('failed-checkpoint-' + [guid]::NewGuid().ToString('N') + '.json')
+            Write-HermesExclusiveFile -LiteralPath $archive -Bytes (New-Object Text.UTF8Encoding($false)).GetBytes(($prior | ConvertTo-Json -Depth 18))
+            Write-HermesEasySetupLog -LiteralPath $logPath -Message ("이전 실패 체크포인트를 보존했습니다: $archive")
+        }
         $prior = Read-HermesInstallState -LiteralPath $paths.StateFile
         if ($Resume) {
             if (-not (Test-HermesStateCanResume -State $prior -Plan $freshPlan -Manifest $manifest)) {
@@ -3284,10 +3334,11 @@ function Invoke-HermesInstall {
         }
         if ($gitPathPreparation.Changed) {
             $gitPathJournal = Set-HermesPreparedGitPath -Preparation $gitPathPreparation -Snapshot $pathExposureSnapshot -RuntimeRoot $paths.RuntimeRoot -TrustedGitPath $trustedGit
-            $pathMessage = "검증된 Git 경로를 사용자 PATH 앞에 추가했습니다. 시스템 PATH·기존 항목은 보존했습니다. 실패 시 변경 충돌을 확인해 복구합니다. 복구 기록: $gitPathJournal"
+            $pathMessage = "사용자 PATH 보정 완료: 검증된 Git을 우선하고 임시 설치 프로필에서도 실제 사용자 경로를 유지합니다. 시스템 PATH·기존 항목 순서는 보존했습니다. 실패 시 원래 문자열·형식을 충돌 확인 후 복구합니다. 기록: $gitPathJournal"
             Write-HermesEasySetupLog -LiteralPath $logPath -Message $pathMessage
             [void](Publish-HermesEvent -Callback $ProgressCallback -Type 'log' -State 'verified' -Message $pathMessage -Percent 11)
         }
+        Save-HermesInstallEnvironmentCheckpoint -State $state -Plan $freshPlan -Snapshot $pathExposureSnapshot -InstallerSha256 $installer.Sha256
         [void](Save-HermesInstallState -LiteralPath $paths.StateFile -State $state)
 
         $powershell = Get-HermesPowerShellExecutable
@@ -3395,11 +3446,14 @@ function Invoke-HermesInstall {
             }
             $persistentPrecondition = Test-HermesPersistentEnvironmentPostcondition -Snapshot $pathExposureSnapshot -Plan $freshPlan
             if (-not $persistentPrecondition.Valid) {
-                Throw-HermesEasySetupError -Message "단계 '$name' 직전 User 환경 변수가 승인된 전이와 다릅니다." -ExitCode 10 -Category 'Preflight'
+                Throw-HermesEasySetupError -Message ("단계 '$name' 직전: " + (Format-HermesPersistentEnvironmentDifference -Snapshot $pathExposureSnapshot -Result $persistentPrecondition)) -ExitCode 10 -Category 'Preflight'
             }
             Set-HermesPersistentEnvironmentStageExpectation -Snapshot $pathExposureSnapshot -Plan $freshPlan -Stage $name
+            Save-HermesInstallEnvironmentCheckpoint -State $state -Plan $freshPlan -Snapshot $pathExposureSnapshot -InstallerSha256 $installer.Sha256
+            [void](Save-HermesInstallState -LiteralPath $paths.StateFile -State $state)
             $stageEnvironment = New-HermesStageEnvironment -Plan $freshPlan -Stage $name -ExistingCheckout:$useExistingCheckout
             try {
+                Assert-HermesStagePathExpansionContext -Environment $stageEnvironment
                 $result = Invoke-HermesProcess -FilePath $powershell -ArgumentList $arguments -Environment $stageEnvironment -TimeoutSeconds $timeout
                 if ($name -ceq 'python' -and $result.Started -and -not $result.TimedOut) {
                     $initialPythonFrame = ConvertFrom-HermesJsonFrame -Text $result.StdOut -RequiredProperty 'stage'
@@ -3438,7 +3492,8 @@ function Invoke-HermesInstall {
                 if (-not $postStageAbsoluteBoundary.Valid) { throw [string]$postStageAbsoluteBoundary.Reason }
                 Complete-HermesPersistentEnvironmentStageExpectation -Snapshot $pathExposureSnapshot -Plan $freshPlan -Stage $name -ManagedCommandProof $managedCommandProof
                 $persistentPostcondition = Test-HermesPersistentEnvironmentPostcondition -Snapshot $pathExposureSnapshot -Plan $freshPlan
-                if (-not $persistentPostcondition.Valid) { throw 'Persistent User environment changed outside the reviewed upstream transition' }
+                if (-not $persistentPostcondition.Valid) { throw (Format-HermesPersistentEnvironmentDifference -Snapshot $pathExposureSnapshot -Result $persistentPostcondition) }
+                Save-HermesInstallEnvironmentCheckpoint -State $state -Plan $freshPlan -Snapshot $pathExposureSnapshot -InstallerSha256 $installer.Sha256
             } catch {
                 $reason = "managed command 또는 User 환경 post-stage 검증에 실패했습니다: $(Protect-HermesLogText $_.Exception.Message)"
                 $state = Set-HermesStageRecord -State $state -Name $name -Status 'Failed' -Reason $reason -DurationMs ([int]$frame.duration_ms) -InstallerSha256 $installer.Sha256

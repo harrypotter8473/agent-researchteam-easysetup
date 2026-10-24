@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 $tests = @('Test-RepositoryHygiene.ps1','Test-PowerShellSyntax.ps1','Run-NstOnlyTests.ps1',
-    'Run-Tests.ps1','Run-PythonCompatibilityTests.ps1','Run-GitPathCompatibilityTests.ps1','Run-SecurityTests.ps1','Run-ExistingRuntimeTests.ps1','Run-CodexRuntimeTests.ps1',
+    'Run-Tests.ps1','Run-PythonCompatibilityTests.ps1','Run-GitPathCompatibilityTests.ps1','Run-InstallEnvironmentRecoveryTests.ps1','Run-SecurityTests.ps1','Run-ExistingRuntimeTests.ps1','Run-CodexRuntimeTests.ps1',
     'Run-CliTests.ps1','Run-AdminTests.ps1','Run-AdminBotTests.ps1','Run-AdminNetworkTests.ps1',
     'Run-DockerTests.ps1','Run-DockerCliTests.ps1','Run-ResearchTests.ps1','Run-ResearchRuntimeTests.ps1',
     'Run-ResearchDefaultsTests.ps1','Run-ResearchMigrationTests.ps1','Run-ResearchPluginsTests.ps1')
